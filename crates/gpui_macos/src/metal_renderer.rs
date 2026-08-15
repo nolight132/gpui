@@ -724,7 +724,8 @@ impl MetalRenderer {
         let command_queue = self.command_queue.clone();
         let command_buffer = command_queue.new_command_buffer();
         let alpha = if self.opaque { 1. } else { 0. };
-        let filtered = !scene.effects.is_empty() || !scene.backdrops.is_empty();
+        let filtered =
+            filters_enabled() && (!scene.effects.is_empty() || !scene.backdrops.is_empty());
         let targets = filtered.then(|| self.filter_targets(viewport_size));
         // Backdrops read what the frame has drawn so far, which a drawable cannot be sampled from,
         // so a frame carrying them is drawn offscreen and blitted back at the end.
@@ -1701,6 +1702,13 @@ impl MetalRenderer {
             );
         }
     }
+}
+
+/// Layer filters can be switched off from the environment to tell a rendering problem from a
+/// compositing one.
+fn filters_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("GPUI_FILTERS").as_deref() != Ok("0"))
 }
 
 /// The texture the frame is drawing into right now: the innermost open layer, or the frame itself.
