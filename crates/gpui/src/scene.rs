@@ -94,23 +94,32 @@ impl Scene {
     ///
     /// The layer takes an order of its own so nothing else can share it: a filtered subtree leaves
     /// the frame as one texture, and anything painted afterwards has to land on top of it.
-    pub fn push_filter(&mut self, bounds: Bounds<ScaledPixels>, filter: Filter) {
-        let order = self.primitive_bounds.insert(everywhere());
-        self.layer_stack.push(order);
+    pub fn push_filter(
+        &mut self,
+        bounds: Bounds<ScaledPixels>,
+        clip: Bounds<ScaledPixels>,
+        filter: Filter,
+    ) {
+        let start = self.primitive_bounds.insert(everywhere());
+        self.layer_stack.push(start);
         self.effects.push(LayerEffect {
-            order,
+            start,
+            end: DrawOrder::MAX,
             bounds,
+            clip,
             filter,
             parent: self.effect_stack.last().copied(),
         });
         self.effect_stack.push(self.effects.len() - 1);
         self.paint_operations
-            .push(PaintOperation::StartFilter(bounds, filter));
+            .push(PaintOperation::StartFilter(bounds, clip, filter));
     }
 
     pub fn pop_filter(&mut self) {
         self.layer_stack.pop();
-        self.effect_stack.pop();
+        if let Some(index) = self.effect_stack.pop() {
+            self.effects[index].end = self.primitive_bounds.insert(everywhere());
+        }
         self.paint_operations.push(PaintOperation::EndFilter);
     }
 
@@ -135,9 +144,17 @@ impl Scene {
         }
     }
 
-    /// The layer that primitives drawn at the given order belong to, if any.
+    /// The innermost layer a primitive drawn at the given order belongs to, if any.
+    ///
+    /// Membership is a range rather than an exact order: elements open stacking layers of their
+    /// own inside a filtered subtree, and their primitives carry those orders instead.
     pub fn filtered(&self, order: DrawOrder) -> Option<usize> {
-        self.effects.iter().position(|layer| layer.order == order)
+        self.effects
+            .iter()
+            .enumerate()
+            .filter(|(_, layer)| (layer.start..layer.end).contains(&order))
+            .map(|(index, _)| index)
+            .next_back()
     }
 
     /// A layer and everything that encloses it, outermost first.
@@ -216,7 +233,9 @@ impl Scene {
                 PaintOperation::Primitive(primitive) => self.insert_primitive(primitive.clone()),
                 PaintOperation::StartLayer(bounds) => self.push_layer(*bounds),
                 PaintOperation::EndLayer => self.pop_layer(),
-                PaintOperation::StartFilter(bounds, filter) => self.push_filter(*bounds, *filter),
+                PaintOperation::StartFilter(bounds, clip, filter) => {
+                    self.push_filter(*bounds, *clip, *filter)
+                }
                 PaintOperation::EndFilter => self.pop_filter(),
             }
         }
@@ -246,6 +265,11 @@ impl Scene {
     )]
     pub fn batches(&self) -> impl Iterator<Item = PrimitiveBatch> + '_ {
         BatchIterator {
+            layered: self
+                .effects
+                .iter()
+                .map(|layer| (layer.start, layer.end))
+                .collect(),
             shadows_start: 0,
             shadows_iter: self.shadows.iter().peekable(),
             backdrops_start: 0,
@@ -293,7 +317,7 @@ pub(crate) enum PaintOperation {
     Primitive(Primitive),
     StartLayer(Bounds<ScaledPixels>),
     EndLayer,
-    StartFilter(Bounds<ScaledPixels>, Filter),
+    StartFilter(Bounds<ScaledPixels>, Bounds<ScaledPixels>, Filter),
     EndFilter,
 }
 
@@ -311,8 +335,13 @@ const REACH: f32 = 1e7;
 #[derive(Clone, Copy, Debug)]
 #[expect(missing_docs)]
 pub struct LayerEffect {
-    pub order: DrawOrder,
+    /// The order the layer opened at. Everything it contains is drawn between this and `end`.
+    pub start: DrawOrder,
+    /// The order the layer closed at.
+    pub end: DrawOrder,
     pub bounds: Bounds<ScaledPixels>,
+    /// Where the composited layer is allowed to land, after the content mask in force at the time.
+    pub clip: Bounds<ScaledPixels>,
     pub filter: Filter,
     /// The enclosing layer, if this one is nested.
     pub parent: Option<usize>,
@@ -399,6 +428,9 @@ impl Primitive {
     allow(dead_code)
 )]
 struct BatchIterator<'a> {
+    /// The order ranges of the filtered layers. A batch never spans one of these boundaries, so a
+    /// layer's primitives can be redirected to its own target without dragging neighbours along.
+    layered: Vec<(DrawOrder, DrawOrder)>,
     shadows_start: usize,
     shadows_iter: Peekable<slice::Iter<'a, Shadow>>,
     backdrops_start: usize,
@@ -465,6 +497,17 @@ impl<'a> Iterator for BatchIterator<'a> {
             return None;
         };
 
+        let first_order = orders_and_kinds[0].0.unwrap_or_default();
+        let layered = std::mem::take(&mut self.layered);
+        let grouped = |next: DrawOrder| {
+            let layer = |order: DrawOrder| {
+                layered
+                    .iter()
+                    .rposition(|(start, end)| (*start..*end).contains(&order))
+            };
+            layer(first_order) == layer(next)
+        };
+
         match batch_kind {
             PrimitiveKind::Shadow => {
                 let shadows_start = self.shadows_start;
@@ -472,12 +515,15 @@ impl<'a> Iterator for BatchIterator<'a> {
                 self.shadows_iter.next();
                 while self
                     .shadows_iter
-                    .next_if(|shadow| (shadow.order, batch_kind) < max_order_and_kind)
+                    .next_if(|shadow| {
+                        (shadow.order, batch_kind) < max_order_and_kind && grouped(shadow.order)
+                    })
                     .is_some()
                 {
                     shadows_end += 1;
                 }
                 self.shadows_start = shadows_end;
+                self.layered = layered;
                 Some(PrimitiveBatch::Shadows(shadows_start..shadows_end))
             }
             PrimitiveKind::Backdrop => {
@@ -486,12 +532,15 @@ impl<'a> Iterator for BatchIterator<'a> {
                 self.backdrops_iter.next();
                 while self
                     .backdrops_iter
-                    .next_if(|backdrop| (backdrop.order, batch_kind) < max_order_and_kind)
+                    .next_if(|backdrop| {
+                        (backdrop.order, batch_kind) < max_order_and_kind && grouped(backdrop.order)
+                    })
                     .is_some()
                 {
                     backdrops_end += 1;
                 }
                 self.backdrops_start = backdrops_end;
+                self.layered = layered;
                 Some(PrimitiveBatch::Backdrops(backdrops_start..backdrops_end))
             }
             PrimitiveKind::Quad => {
@@ -500,12 +549,15 @@ impl<'a> Iterator for BatchIterator<'a> {
                 self.quads_iter.next();
                 while self
                     .quads_iter
-                    .next_if(|quad| (quad.order, batch_kind) < max_order_and_kind)
+                    .next_if(|quad| {
+                        (quad.order, batch_kind) < max_order_and_kind && grouped(quad.order)
+                    })
                     .is_some()
                 {
                     quads_end += 1;
                 }
                 self.quads_start = quads_end;
+                self.layered = layered;
                 Some(PrimitiveBatch::Quads(quads_start..quads_end))
             }
             PrimitiveKind::Path => {
@@ -514,12 +566,15 @@ impl<'a> Iterator for BatchIterator<'a> {
                 self.paths_iter.next();
                 while self
                     .paths_iter
-                    .next_if(|path| (path.order, batch_kind) < max_order_and_kind)
+                    .next_if(|path| {
+                        (path.order, batch_kind) < max_order_and_kind && grouped(path.order)
+                    })
                     .is_some()
                 {
                     paths_end += 1;
                 }
                 self.paths_start = paths_end;
+                self.layered = layered;
                 Some(PrimitiveBatch::Paths(paths_start..paths_end))
             }
             PrimitiveKind::Underline => {
@@ -528,12 +583,16 @@ impl<'a> Iterator for BatchIterator<'a> {
                 self.underlines_iter.next();
                 while self
                     .underlines_iter
-                    .next_if(|underline| (underline.order, batch_kind) < max_order_and_kind)
+                    .next_if(|underline| {
+                        (underline.order, batch_kind) < max_order_and_kind
+                            && grouped(underline.order)
+                    })
                     .is_some()
                 {
                     underlines_end += 1;
                 }
                 self.underlines_start = underlines_end;
+                self.layered = layered;
                 Some(PrimitiveBatch::Underlines(underlines_start..underlines_end))
             }
             PrimitiveKind::MonochromeSprite => {
@@ -545,6 +604,7 @@ impl<'a> Iterator for BatchIterator<'a> {
                     .monochrome_sprites_iter
                     .next_if(|sprite| {
                         (sprite.order, batch_kind) < max_order_and_kind
+                            && grouped(sprite.order)
                             && sprite.tile.texture_id == texture_id
                     })
                     .is_some()
@@ -552,6 +612,7 @@ impl<'a> Iterator for BatchIterator<'a> {
                     sprites_end += 1;
                 }
                 self.monochrome_sprites_start = sprites_end;
+                self.layered = layered;
                 Some(PrimitiveBatch::MonochromeSprites {
                     texture_id,
                     range: sprites_start..sprites_end,
@@ -566,6 +627,7 @@ impl<'a> Iterator for BatchIterator<'a> {
                     .subpixel_sprites_iter
                     .next_if(|sprite| {
                         (sprite.order, batch_kind) < max_order_and_kind
+                            && grouped(sprite.order)
                             && sprite.tile.texture_id == texture_id
                     })
                     .is_some()
@@ -573,6 +635,7 @@ impl<'a> Iterator for BatchIterator<'a> {
                     sprites_end += 1;
                 }
                 self.subpixel_sprites_start = sprites_end;
+                self.layered = layered;
                 Some(PrimitiveBatch::SubpixelSprites {
                     texture_id,
                     range: sprites_start..sprites_end,
@@ -587,6 +650,7 @@ impl<'a> Iterator for BatchIterator<'a> {
                     .polychrome_sprites_iter
                     .next_if(|sprite| {
                         (sprite.order, batch_kind) < max_order_and_kind
+                            && grouped(sprite.order)
                             && sprite.tile.texture_id == texture_id
                     })
                     .is_some()
@@ -594,6 +658,7 @@ impl<'a> Iterator for BatchIterator<'a> {
                     sprites_end += 1;
                 }
                 self.polychrome_sprites_start = sprites_end;
+                self.layered = layered;
                 Some(PrimitiveBatch::PolychromeSprites {
                     texture_id,
                     range: sprites_start..sprites_end,
@@ -605,12 +670,15 @@ impl<'a> Iterator for BatchIterator<'a> {
                 self.surfaces_iter.next();
                 while self
                     .surfaces_iter
-                    .next_if(|surface| (surface.order, batch_kind) < max_order_and_kind)
+                    .next_if(|surface| {
+                        (surface.order, batch_kind) < max_order_and_kind && grouped(surface.order)
+                    })
                     .is_some()
                 {
                     surfaces_end += 1;
                 }
                 self.surfaces_start = surfaces_end;
+                self.layered = layered;
                 Some(PrimitiveBatch::Surfaces(surfaces_start..surfaces_end))
             }
         }

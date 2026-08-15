@@ -1898,7 +1898,7 @@ impl WgpuRenderer {
                     );
                     self.composite_layer(
                         blurred,
-                        layer.bounds,
+                        layer.clip,
                         layer.filter.fades(),
                         &params,
                         &mut pass,
@@ -2074,7 +2074,7 @@ impl WgpuRenderer {
                 );
                 self.composite_layer(
                     blurred,
-                    layer.bounds,
+                    layer.clip,
                     layer.filter.fades(),
                     &params,
                     &mut pass,

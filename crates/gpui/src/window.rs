@@ -4207,9 +4207,9 @@ impl Window {
         }
 
         let reach = px(filter.blur * BLUR_REACH / scale_factor);
-        self.next_frame
-            .scene
-            .push_filter(bounds.dilate(reach).scale(scale_factor), filter);
+        let bounds = bounds.dilate(reach).scale(scale_factor);
+        let clip = bounds.intersect(&self.snapped_content_mask().bounds);
+        self.next_frame.scene.push_filter(bounds, clip, filter);
         let result = f(self);
         self.next_frame.scene.pop_filter();
         result
@@ -4434,9 +4434,7 @@ impl Window {
             (quantized_origin.y.fract() * SUBPIXEL_VARIANTS_Y as f32) as u8,
         );
         let integer_origin = quantized_origin.map(|c| ScaledPixels(c.trunc()));
-        let blur = self.text_blur(scale_factor);
-        let subpixel_rendering =
-            blur == 0 && self.should_use_subpixel_rendering(font_id, font_size);
+        let subpixel_rendering = self.should_use_subpixel_rendering(font_id, font_size);
         let dilation = self.text_system().glyph_dilation_for_color(color);
         let params = RenderGlyphParams {
             font_id,
@@ -4447,7 +4445,6 @@ impl Window {
             is_emoji: false,
             subpixel_rendering,
             dilation,
-            blur,
         };
 
         let raster_bounds = self.text_system().raster_bounds(&params)?;
@@ -4488,20 +4485,6 @@ impl Window {
             }
         }
         Ok(())
-    }
-
-    /// The blur radius the current text style asks for, in quarters of a device pixel.
-    fn text_blur(&self, scale_factor: f32) -> u8 {
-        let blur = self
-            .text_style_stack
-            .iter()
-            .rev()
-            .find_map(|refinement| refinement.blur)
-            .unwrap_or_default();
-
-        (blur.0 * scale_factor * 4.)
-            .round()
-            .clamp(0., u8::MAX as f32) as u8
     }
 
     fn should_use_subpixel_rendering(&self, font_id: FontId, font_size: Pixels) -> bool {
@@ -4552,7 +4535,6 @@ impl Window {
             is_emoji: true,
             subpixel_rendering: false,
             dilation: 0,
-            blur: 0,
         };
 
         let raster_bounds = self.text_system().raster_bounds(&params)?;

@@ -536,14 +536,6 @@ pub trait Styled: Sized {
         self
     }
 
-    /// Sets the gaussian blur applied to the text of this element.
-    ///
-    /// This value cascades to its child elements.
-    fn text_blur(mut self, blur: Pixels) -> Self {
-        self.text_style().blur = Some(blur);
-        self
-    }
-
     /// Sets the font weight of this element
     ///
     /// This value cascades to its child elements.

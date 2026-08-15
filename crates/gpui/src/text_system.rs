@@ -10,16 +10,12 @@ pub use line::*;
 pub use line_layout::*;
 pub use line_wrapper::*;
 
-/// Blur radii are quantized to quarters of a device pixel.
-const BLUR_STEPS: f32 = 4.;
-/// A gaussian is cut off after three standard deviations.
-const BLUR_SPAN: f32 = 3.;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::{
     Bounds, DevicePixels, Hsla, Pixels, PlatformTextSystem, Point, Result, SharedString, Size,
-    StrikethroughStyle, TextRenderingMode, UnderlineStyle, point, px, size,
+    StrikethroughStyle, TextRenderingMode, UnderlineStyle, px,
 };
 use anyhow::{Context as _, anyhow};
 use collections::FxHashMap;
@@ -333,7 +329,6 @@ impl TextSystem {
         } else {
             let mut raster_bounds = RwLockUpgradableReadGuard::upgrade(raster_bounds);
             let bounds = self.platform_text_system.glyph_raster_bounds(params)?;
-            let bounds = grown(bounds, params.blur_reach());
             raster_bounds.insert(params.clone(), bounds);
             Ok(bounds)
         }
@@ -343,21 +338,9 @@ impl TextSystem {
         &self,
         params: &RenderGlyphParams,
     ) -> Result<(Size<DevicePixels>, Vec<u8>)> {
-        let reach = params.blur_reach();
-        if reach == 0 {
-            let raster_bounds = self.raster_bounds(params)?;
-            return self
-                .platform_text_system
-                .rasterize_glyph(params, raster_bounds);
-        }
-
-        let sharp = RenderGlyphParams {
-            blur: 0,
-            ..params.clone()
-        };
-        let bounds = self.raster_bounds(&sharp)?;
-        let (size, mask) = self.platform_text_system.rasterize_glyph(&sharp, bounds)?;
-        Ok(blurred(size, mask, reach, params.sigma()))
+        let raster_bounds = self.raster_bounds(params)?;
+        self.platform_text_system
+            .rasterize_glyph(params, raster_bounds)
     }
 
     /// Returns the dilation level to use for a glyph painted in the given color.
@@ -1047,23 +1030,6 @@ pub struct RenderGlyphParams {
     pub is_emoji: bool,
     pub subpixel_rendering: bool,
     pub dilation: u8,
-    /// The gaussian blur radius, in quarters of a device pixel.
-    pub blur: u8,
-}
-
-impl RenderGlyphParams {
-    /// The standard deviation of the glyph blur, in device pixels.
-    pub fn sigma(&self) -> f32 {
-        self.blur as f32 / BLUR_STEPS
-    }
-
-    /// How far the blur spills past the glyph, in device pixels.
-    pub fn blur_reach(&self) -> i32 {
-        match self.blur {
-            0 => 0,
-            _ => (self.sigma() * BLUR_SPAN).ceil() as i32,
-        }
-    }
 }
 
 impl Eq for RenderGlyphParams {}
@@ -1078,7 +1044,6 @@ impl Hash for RenderGlyphParams {
         self.is_emoji.hash(state);
         self.subpixel_rendering.hash(state);
         self.dilation.hash(state);
-        self.blur.hash(state);
     }
 }
 
@@ -1239,107 +1204,4 @@ pub fn font_name_with_fallbacks_shared<'a>(
         ".ZedMono" | "Zed Plex Mono" => const { &SharedString::new_static("Lilex") },
         _ => name,
     }
-}
-
-fn grown(bounds: Bounds<DevicePixels>, reach: i32) -> Bounds<DevicePixels> {
-    if reach == 0 || bounds.size.width.0 == 0 || bounds.size.height.0 == 0 {
-        return bounds;
-    }
-
-    Bounds {
-        origin: point(
-            DevicePixels(bounds.origin.x.0 - reach),
-            DevicePixels(bounds.origin.y.0 - reach),
-        ),
-        size: size(
-            DevicePixels(bounds.size.width.0 + reach * 2),
-            DevicePixels(bounds.size.height.0 + reach * 2),
-        ),
-    }
-}
-
-fn blurred(
-    bitmap: Size<DevicePixels>,
-    mask: Vec<u8>,
-    reach: i32,
-    sigma: f32,
-) -> (Size<DevicePixels>, Vec<u8>) {
-    let (width, height) = (
-        bitmap.width.0.max(0) as usize,
-        bitmap.height.0.max(0) as usize,
-    );
-    let pixels = width * height;
-    if pixels == 0 || reach <= 0 {
-        return (bitmap, mask);
-    }
-    let channels = (mask.len() / pixels).max(1);
-    let pad = reach as usize;
-    let (wide, tall) = (width + pad * 2, height + pad * 2);
-
-    let mut padded = vec![0u8; wide * tall * channels];
-    for row in 0..height {
-        let from = row * width * channels;
-        let into = ((row + pad) * wide + pad) * channels;
-        padded[into..into + width * channels].copy_from_slice(&mask[from..from + width * channels]);
-    }
-
-    let kernel = gaussian(sigma, pad);
-    let swept = sweep(&padded, wide, tall, channels, &kernel, true);
-    let swept = sweep(&swept, wide, tall, channels, &kernel, false);
-
-    (
-        size(DevicePixels(wide as i32), DevicePixels(tall as i32)),
-        swept,
-    )
-}
-
-fn gaussian(sigma: f32, reach: usize) -> Vec<f32> {
-    let spread = 2. * sigma * sigma;
-    let mut weights: Vec<f32> = (0..=reach * 2)
-        .map(|index| {
-            let step = index as f32 - reach as f32;
-            (-step * step / spread).exp()
-        })
-        .collect();
-    let total: f32 = weights.iter().sum();
-    for weight in &mut weights {
-        *weight /= total;
-    }
-    weights
-}
-
-fn sweep(
-    source: &[u8],
-    wide: usize,
-    tall: usize,
-    channels: usize,
-    kernel: &[f32],
-    across: bool,
-) -> Vec<u8> {
-    let reach = (kernel.len() / 2) as isize;
-    let mut blurred = vec![0u8; source.len()];
-
-    for row in 0..tall {
-        for column in 0..wide {
-            for channel in 0..channels {
-                let mut total = 0.;
-                for (index, weight) in kernel.iter().enumerate() {
-                    let step = index as isize - reach;
-                    let (x, y) = match across {
-                        true => (column as isize + step, row as isize),
-                        false => (column as isize, row as isize + step),
-                    };
-                    if x < 0 || y < 0 || x >= wide as isize || y >= tall as isize {
-                        continue;
-                    }
-                    total += source[(y as usize * wide + x as usize) * channels + channel] as f32
-                        * weight;
-                }
-                blurred[(row * wide + column) * channels + channel] =
-                    total.round().clamp(0., 255.) as u8;
-            }
-        }
-    }
-
-    blurred
 }
