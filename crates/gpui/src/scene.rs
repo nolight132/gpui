@@ -242,6 +242,11 @@ impl Scene {
     }
 
     pub fn finish(&mut self) {
+        // A layer that never closed would otherwise swallow everything painted after it.
+        for index in self.effect_stack.drain(..) {
+            log::warn!("scene: a filtered layer was left open");
+            self.effects[index].end = self.effects[index].start;
+        }
         self.shadows.sort_by_key(|shadow| shadow.order);
         self.backdrops.sort_by_key(|backdrop| backdrop.order);
         self.quads.sort_by_key(|quad| quad.order);

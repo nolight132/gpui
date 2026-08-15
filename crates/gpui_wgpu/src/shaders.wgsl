@@ -1404,7 +1404,7 @@ fn fs_backdrop(input: BackdropVarying) -> @location(0) vec4<f32> {
     let distance = quad_sdf(position, backdrop.bounds, backdrop.corner_radii);
     let coverage = saturate(0.5 - distance);
 
-    return blend_color(sampled, coverage * backdrop.opacity);
+    return sampled * coverage * backdrop.opacity;
 }
 
 // --- blur --- //
@@ -1456,6 +1456,11 @@ fn fs_blur(input: BlurVarying) -> @location(0) vec4<f32> {
 @fragment
 fn fs_blit(input: BlurVarying) -> @location(0) vec4<f32> {
     return textureSample(t_sprite, s_sprite, input.uv);
+}
+
+@fragment
+fn fs_erase(input: BlurVarying) -> @location(0) vec4<f32> {
+    return vec4<f32>(0.0);
 }
 
 // --- layer masks --- //
