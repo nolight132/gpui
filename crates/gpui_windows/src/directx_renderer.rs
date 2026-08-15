@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use gpui_util::ResultExt;
 use windows::{
     Win32::{
-        Foundation::HWND,
+        Foundation::{HWND, RECT},
         Graphics::{
             Direct3D::*,
             Direct3D11::*,
@@ -27,6 +27,13 @@ pub(crate) const DISABLE_DIRECT_COMPOSITION: &str = "GPUI_DISABLE_DIRECT_COMPOSI
 const RENDER_TARGET_FORMAT: DXGI_FORMAT = DXGI_FORMAT_B8G8R8A8_UNORM;
 // This configuration is used for MSAA rendering on paths only, and it's guaranteed to be supported by DirectX 11.
 const PATH_MULTISAMPLE_COUNT: u32 = 4;
+/// The resolutions a blur can run at, as divisors of the frame. A radius picks the first step it
+/// fits within, so small blurs keep every pixel and wide ones stay cheap.
+const BLUR_STEPS: [u32; 3] = [1, 2, 4];
+/// A gaussian is cut off after three standard deviations.
+const BLUR_REACH: f32 = 4.;
+/// How deeply filtered layers can nest before the innermost ones stop being filtered.
+const LAYER_DEPTH: usize = 4;
 const MAX_INSTANCE_BUFFER_SIZE: usize = 256 * 1024 * 1024;
 
 pub(crate) struct FontInfo {
@@ -79,11 +86,73 @@ struct DirectXResources {
     path_intermediate_msaa_texture: ID3D11Texture2D,
     path_intermediate_msaa_view: Option<ID3D11RenderTargetView>,
 
+    // Offscreen targets the frame blurs and masks through
+    filters: FilterTargets,
+
     // Cached viewport
     viewport: D3D11_VIEWPORT,
 }
 
+/// A texture the renderer can both draw into and sample from.
+struct RenderTexture {
+    _texture: ID3D11Texture2D,
+    view: Option<ID3D11RenderTargetView>,
+    source: Option<ID3D11ShaderResourceView>,
+}
+
+/// Offscreen targets a frame needs to blur and mask what it has drawn.
+struct FilterTargets {
+    frame: RenderTexture,
+    layers: Vec<RenderTexture>,
+    /// Ping-pong pairs for the blur passes, one per resolution step.
+    steps: Vec<[RenderTexture; 2]>,
+}
+
+impl FilterTargets {
+    fn new(device: &ID3D11Device, width: u32, height: u32) -> Result<Self> {
+        let mut steps = Vec::with_capacity(BLUR_STEPS.len());
+        for shrink in BLUR_STEPS {
+            steps.push([
+                create_render_texture(device, width / shrink, height / shrink)?,
+                create_render_texture(device, width / shrink, height / shrink)?,
+            ]);
+        }
+        let mut layers = Vec::with_capacity(LAYER_DEPTH);
+        for _ in 0..LAYER_DEPTH {
+            layers.push(create_render_texture(device, width, height)?);
+        }
+
+        Ok(Self {
+            frame: create_render_texture(device, width, height)?,
+            layers,
+            steps,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+#[repr(C)]
+struct FilterParams {
+    bounds: Bounds<ScaledPixels>,
+    direction: [f32; 2],
+    sigma: f32,
+    fade_top: f32,
+    fade_bottom: f32,
+    pad: [f32; 3],
+}
+
+#[derive(Clone, Copy)]
+enum Pass {
+    Blur,
+    Blit,
+}
+
 struct DirectXRenderPipelines {
+    backdrop_pipeline: PipelineState<Backdrop>,
+    blur_pipeline: PipelineState<FilterParams>,
+    blit_pipeline: PipelineState<FilterParams>,
+    composite_pipeline: PipelineState<FilterParams>,
+    mask_pipeline: PipelineState<FilterParams>,
     shadow_pipeline: PipelineState<Shadow>,
     quad_pipeline: PipelineState<Quad>,
     path_rasterization_pipeline: PipelineState<PathRasterizationSprite>,
@@ -242,6 +311,356 @@ impl DirectXRenderer {
     }
 
     #[inline]
+    /// The handles a filter pass needs, cloned so the pipelines can be borrowed alongside them.
+    fn pipeline_handles(
+        &self,
+    ) -> Result<(
+        ID3D11Device,
+        ID3D11DeviceContext,
+        ID3D11SamplerState,
+        ID3D11Buffer,
+    )> {
+        let devices = self.devices.as_ref().context("devices missing")?;
+
+        Ok((
+            devices.device.clone(),
+            devices.device_context.clone(),
+            self.globals
+                .sampler
+                .as_ref()
+                .context("missing sampler")?
+                .clone(),
+            self.globals
+                .batch_params_buffer
+                .as_ref()
+                .context("missing batch params")?
+                .clone(),
+        ))
+    }
+
+    /// Points the pipeline at one of the offscreen targets, or at the frame when `depth` is none.
+    fn open_target(&self, depth: Option<usize>) -> Result<()> {
+        let resources = self.resources.as_ref().context("resources missing")?;
+        let devices = self.devices.as_ref().context("devices missing")?;
+        let view = match depth {
+            Some(depth) => &resources.filters.layers[depth.min(LAYER_DEPTH - 1)].view,
+            None => &resources.filters.frame.view,
+        };
+        unsafe {
+            devices
+                .device_context
+                .OMSetRenderTargets(Some(slice::from_ref(view)), None);
+            devices
+                .device_context
+                .RSSetViewports(Some(slice::from_ref(&resources.viewport)));
+        }
+        self.reset_scissor()?;
+
+        Ok(())
+    }
+
+    fn open_layer(&self, depth: usize, clear: bool) -> Result<()> {
+        if clear {
+            let resources = self.resources.as_ref().context("resources missing")?;
+            let devices = self.devices.as_ref().context("devices missing")?;
+            let view = resources.filters.layers[depth.min(LAYER_DEPTH - 1)]
+                .view
+                .as_ref()
+                .context("missing layer target")?;
+            unsafe {
+                devices
+                    .device_context
+                    .ClearRenderTargetView(view, &[0.0f32; 4]);
+            }
+        }
+
+        self.open_target(Some(depth))
+    }
+
+    /// Draws a filtered layer back into its parent, clipped to the layer's bounds.
+    fn close_layer(
+        &mut self,
+        stack: &[usize],
+        layer: LayerEffect,
+        clip: Bounds<ScaledPixels>,
+        mirrored: bool,
+    ) -> Result<()> {
+        let depth = stack.len();
+        let source = {
+            let resources = self.resources.as_ref().context("resources missing")?;
+            resources.filters.layers[depth.min(LAYER_DEPTH - 1)]
+                .source
+                .clone()
+        };
+        let blurred = match layer.filter.blurs() {
+            true => self.blur_source(source, layer.filter.blur, Some(clip))?,
+            false => source,
+        };
+
+        match depth.checked_sub(1) {
+            Some(onto) => self.open_target(Some(onto))?,
+            None => self.restore_frame(mirrored)?,
+        }
+        let Some(within) = self.scissor(clip, 1)? else {
+            return Ok(());
+        };
+
+        let (device, device_context, sampler, batch_params) = self.pipeline_handles()?;
+        let params = [FilterParams {
+            bounds: clip,
+            fade_top: layer.filter.fade_top,
+            fade_bottom: layer.filter.fade_bottom,
+            ..Default::default()
+        }];
+
+        self.set_scissor(within);
+        let pipeline = match layer.filter.fades() {
+            true => &mut self.pipelines.mask_pipeline,
+            false => &mut self.pipelines.composite_pipeline,
+        };
+        pipeline.update_buffer(&device, &device_context, &params)?;
+        pipeline.draw_range_with_texture(
+            &device_context,
+            slice::from_ref(&blurred),
+            &batch_params,
+            slice::from_ref(&Some(sampler)),
+            0,
+            1,
+        )?;
+        self.reset_scissor()?;
+
+        Ok(())
+    }
+
+    /// Blurs a source into one of the ping-pong targets and returns the one holding the result.
+    ///
+    /// The resolution follows the radius: a small blur stays at full resolution, where downsampling
+    /// would turn text into mush, and only a wide one is worth shrinking first.
+    fn blur_source(
+        &mut self,
+        source: Option<ID3D11ShaderResourceView>,
+        sigma: f32,
+        clip: Option<Bounds<ScaledPixels>>,
+    ) -> Result<Option<ID3D11ShaderResourceView>> {
+        let step = BLUR_STEPS
+            .iter()
+            .position(|shrink| sigma <= BLUR_REACH * *shrink as f32)
+            .unwrap_or(BLUR_STEPS.len() - 1);
+        let shrink = BLUR_STEPS[step] as f32;
+        // Each pass reads a kernel's width beyond what the next one needs, so the region grows
+        // from the composited clip outwards.
+        let region = |renderer: &Self, margin: f32, shrink: u32| match clip {
+            Some(clip) => renderer.scissor(clip.dilate(ScaledPixels(margin)), shrink),
+            None => Ok(None),
+        };
+
+        let mut from = source;
+        for shrunk in 0..step {
+            let shrink = BLUR_STEPS[shrunk + 1];
+            let within = region(self, sigma * BLUR_REACH * 2., shrink)?;
+            from = self.filter_pass(Pass::Blit, from, [shrunk, 0], None, within)?;
+        }
+
+        let across = FilterParams {
+            direction: [1., 0.],
+            sigma: sigma / shrink,
+            ..Default::default()
+        };
+        let down = FilterParams {
+            direction: [0., 1.],
+            sigma: sigma / shrink,
+            ..Default::default()
+        };
+        let shrink = BLUR_STEPS[step];
+        let spread = region(self, sigma * BLUR_REACH, shrink)?;
+        let scratch = self.filter_pass(Pass::Blur, from, [step, 1], Some(across), spread)?;
+        let settled = region(self, 0., shrink)?;
+
+        self.filter_pass(Pass::Blur, scratch, [step, 0], Some(down), settled)
+    }
+
+    /// Draws one full-screen pass of a filter into a ping-pong target, returning what it wrote.
+    fn filter_pass(
+        &mut self,
+        pass: Pass,
+        source: Option<ID3D11ShaderResourceView>,
+        target: [usize; 2],
+        params: Option<FilterParams>,
+        within: Option<[u32; 4]>,
+    ) -> Result<Option<ID3D11ShaderResourceView>> {
+        let (view, held, viewport) = {
+            let resources = self.resources.as_ref().context("resources missing")?;
+            let step = &resources.filters.steps[target[0]][target[1]];
+            let shrink = BLUR_STEPS[target[0]] as f32;
+            (
+                step.view.clone(),
+                step.source.clone(),
+                D3D11_VIEWPORT {
+                    TopLeftX: 0.,
+                    TopLeftY: 0.,
+                    Width: resources.viewport.Width / shrink,
+                    Height: resources.viewport.Height / shrink,
+                    MinDepth: 0.,
+                    MaxDepth: 1.,
+                },
+            )
+        };
+        let (device, device_context, sampler, batch_params) = self.pipeline_handles()?;
+
+        unsafe {
+            device_context.OMSetRenderTargets(Some(slice::from_ref(&view)), None);
+            device_context.RSSetViewports(Some(slice::from_ref(&viewport)));
+            if let Some(view) = view.as_ref() {
+                device_context.ClearRenderTargetView(view, &[0.0f32; 4]);
+            }
+        }
+        match within {
+            Some(within) => self.set_scissor(within),
+            None => self.set_scissor([0, 0, viewport.Width as u32, viewport.Height as u32]),
+        }
+
+        let pipeline = match pass {
+            Pass::Blur => &mut self.pipelines.blur_pipeline,
+            Pass::Blit => &mut self.pipelines.blit_pipeline,
+        };
+        pipeline.update_buffer(&device, &device_context, &[params.unwrap_or_default()])?;
+        pipeline.draw_range_with_texture(
+            &device_context,
+            slice::from_ref(&source),
+            &batch_params,
+            slice::from_ref(&Some(sampler)),
+            0,
+            1,
+        )?;
+
+        Ok(held)
+    }
+
+    fn draw_backdrops(
+        &mut self,
+        first: usize,
+        count: usize,
+        sigma: f32,
+        mirrored: bool,
+    ) -> Result<()> {
+        let frame = {
+            let resources = self.resources.as_ref().context("resources missing")?;
+            resources.filters.frame.source.clone()
+        };
+        let blurred = self.blur_source(frame, sigma, None)?;
+        self.restore_frame(mirrored)?;
+
+        let (_, device_context, sampler, batch_params) = self.pipeline_handles()?;
+
+        self.pipelines.backdrop_pipeline.draw_range_with_texture(
+            &device_context,
+            slice::from_ref(&blurred),
+            &batch_params,
+            slice::from_ref(&Some(sampler)),
+            first as u32,
+            count as u32,
+        )
+    }
+
+    /// Points the pipeline back at what the frame is drawn into, offscreen or not.
+    fn restore_frame(&self, mirrored: bool) -> Result<()> {
+        if mirrored {
+            return self.open_target(None);
+        }
+
+        let resources = self.resources.as_ref().context("resources missing")?;
+        let devices = self.devices.as_ref().context("devices missing")?;
+        unsafe {
+            devices
+                .device_context
+                .OMSetRenderTargets(Some(slice::from_ref(&resources.render_target_view)), None);
+            devices
+                .device_context
+                .RSSetViewports(Some(slice::from_ref(&resources.viewport)));
+        }
+        self.reset_scissor()?;
+
+        Ok(())
+    }
+
+    /// Copies the offscreen frame onto the swap chain.
+    fn blit_frame(&mut self) -> Result<()> {
+        let source = {
+            let resources = self.resources.as_ref().context("resources missing")?;
+            resources.filters.frame.source.clone()
+        };
+        self.restore_frame(false)?;
+
+        let (device, device_context, sampler, batch_params) = self.pipeline_handles()?;
+
+        self.pipelines.blit_pipeline.update_buffer(
+            &device,
+            &device_context,
+            &[FilterParams::default()],
+        )?;
+        self.pipelines.blit_pipeline.draw_range_with_texture(
+            &device_context,
+            slice::from_ref(&source),
+            &batch_params,
+            slice::from_ref(&Some(sampler)),
+            0,
+            1,
+        )
+    }
+
+    /// Clamps a region to the target it is drawn into, shrunk to the blur step it runs at.
+    fn scissor(&self, bounds: Bounds<ScaledPixels>, shrink: u32) -> Result<Option<[u32; 4]>> {
+        let resources = self.resources.as_ref().context("resources missing")?;
+        let shrink = shrink as f32;
+        let width = resources.viewport.Width / shrink;
+        let height = resources.viewport.Height / shrink;
+        let left = (bounds.origin.x.0 / shrink).max(0.).min(width);
+        let top = (bounds.origin.y.0 / shrink).max(0.).min(height);
+        let right = ((bounds.origin.x.0 + bounds.size.width.0) / shrink)
+            .max(0.)
+            .min(width);
+        let bottom = ((bounds.origin.y.0 + bounds.size.height.0) / shrink)
+            .max(0.)
+            .min(height);
+        if right <= left || bottom <= top {
+            return Ok(None);
+        }
+
+        Ok(Some([
+            left as u32,
+            top as u32,
+            (right - left) as u32,
+            (bottom - top) as u32,
+        ]))
+    }
+
+    fn set_scissor(&self, within: [u32; 4]) {
+        let Some(devices) = self.devices.as_ref() else {
+            return;
+        };
+        let [left, top, width, height] = within;
+        unsafe {
+            devices.device_context.RSSetScissorRects(Some(&[RECT {
+                left: left as i32,
+                top: top as i32,
+                right: (left + width) as i32,
+                bottom: (top + height) as i32,
+            }]));
+        }
+    }
+
+    fn reset_scissor(&self) -> Result<()> {
+        let resources = self.resources.as_ref().context("resources missing")?;
+        self.set_scissor([
+            0,
+            0,
+            resources.viewport.Width as u32,
+            resources.viewport.Height as u32,
+        ]);
+
+        Ok(())
+    }
+
     fn present(&mut self) -> Result<()> {
         let result = unsafe {
             self.resources
@@ -344,6 +763,31 @@ impl DirectXRenderer {
 
         self.upload_scene_buffers(scene)?;
 
+        // Backdrops read what the frame has drawn so far, which the swap chain cannot be sampled
+        // from, so a frame carrying them is drawn offscreen and blitted back at the end.
+        let mirrored = !scene.backdrops.is_empty();
+        if mirrored {
+            let cleared = {
+                let resources = self.resources.as_ref().context("resources missing")?;
+                resources.filters.frame.view.clone()
+            };
+            let devices = self.devices.as_ref().context("devices missing")?;
+            if let Some(cleared) = cleared.as_ref() {
+                unsafe {
+                    devices
+                        .device_context
+                        .ClearRenderTargetView(cleared, &[0.0f32; 4])
+                };
+            }
+            self.open_target(None)?;
+        }
+
+        let mut stack: Vec<usize> = Vec::new();
+        // What each open layer will be composited through: neighbours that ask for the same filter
+        // share one target, so a list of separately blurred rows costs one pass, not one per row.
+        let mut spans: Vec<Bounds<ScaledPixels>> = Vec::new();
+        let mut cleared = [false; LAYER_DEPTH];
+
         let annotation = self
             .devices
             .as_ref()
@@ -353,6 +797,58 @@ impl DirectXRenderer {
             let _annotation = annotation
                 .as_ref()
                 .map(|annotation| Annotation::new(annotation, HSTRING::from(batch.label())));
+
+            let wanted = scene
+                .filtered(scene.batch_order(&batch))
+                .map(|index| scene.filter_chain(index))
+                .unwrap_or_default();
+            let shared = stack
+                .iter()
+                .zip(wanted.iter())
+                .take_while(|(open, next)| open == next)
+                .count();
+
+            let mut merged = false;
+            while stack.len() > shared {
+                if stack.len() == shared + 1
+                    && wanted.len() == stack.len()
+                    && let Some(open) = stack.last_mut()
+                    && let Some(span) = spans.last_mut()
+                {
+                    let next = scene.effects[wanted[shared]];
+                    let layer = scene.effects[*open];
+                    if next.filter == layer.filter
+                        && next.parent == layer.parent
+                        && !next.filter.fades()
+                    {
+                        *open = wanted[shared];
+                        *span = span.union(&next.clip);
+                        merged = true;
+                        break;
+                    }
+                }
+
+                let index = stack.pop().expect("the stack is not empty");
+                let layer = scene.effects[index];
+                let clip = spans.pop().unwrap_or(layer.clip);
+                self.close_layer(&stack, layer, clip, mirrored)?;
+            }
+
+            for index in wanted.iter().skip(shared + usize::from(merged)) {
+                if stack.len() >= LAYER_DEPTH {
+                    break;
+                }
+                let layer = scene.effects[*index];
+                let depth = stack.len();
+                // The target is wiped the first time a frame reaches this depth. Layers that share
+                // it afterwards sit side by side, so clearing again would eat what the one before
+                // drew.
+                self.open_layer(depth, !cleared[depth])?;
+                cleared[depth] = true;
+                stack.push(*index);
+                spans.push(layer.clip);
+            }
+
             match batch {
                 PrimitiveBatch::Shadows(range) => self.draw_shadows(range.start, range.len()),
                 PrimitiveBatch::Quads(range) => self.draw_quads(range.start, range.len()),
@@ -371,8 +867,15 @@ impl DirectXRenderer {
                 PrimitiveBatch::PolychromeSprites { texture_id, range } => {
                     self.draw_polychrome_sprites(texture_id, range.start, range.len())
                 }
-                // Backdrop blur has not been ported to DirectX yet.
-                PrimitiveBatch::Backdrops(_range) => {}
+                PrimitiveBatch::Backdrops(range) => {
+                    if stack.is_empty() {
+                        let sigma = scene.backdrops[range.clone()]
+                            .iter()
+                            .fold(0., |widest: f32, backdrop| widest.max(backdrop.blur));
+                        self.draw_backdrops(range.start, range.len(), sigma, mirrored)?;
+                    }
+                    Ok(())
+                }
                 PrimitiveBatch::Surfaces(range) => self.draw_surfaces(&scene.surfaces[range]),
             }
             .with_context(|| {
@@ -390,6 +893,17 @@ impl DirectXRenderer {
                 )
             })?;
         }
+
+        while let Some(index) = stack.pop() {
+            let layer = scene.effects[index];
+            let clip = spans.pop().unwrap_or(layer.clip);
+            self.close_layer(&stack, layer, clip, mirrored)?;
+        }
+
+        if mirrored {
+            self.blit_frame()?;
+        }
+
         self.present()
     }
 
@@ -445,6 +959,14 @@ impl DirectXRenderer {
                 &devices.device,
                 &devices.device_context,
                 &scene.shadows,
+            )?;
+        }
+
+        if !scene.backdrops.is_empty() {
+            self.pipelines.backdrop_pipeline.update_buffer(
+                &devices.device,
+                &devices.device_context,
+                &scene.backdrops,
             )?;
         }
 
@@ -803,10 +1325,12 @@ impl DirectXResources {
             path_intermediate_msaa_view,
             viewport,
         ) = create_resources(devices, &swap_chain, width, height)?;
+        let filters = FilterTargets::new(&devices.device, width, height)?;
         set_rasterizer_state(&devices.device, &devices.device_context)?;
 
         Ok(Self {
             swap_chain,
+            filters,
             render_target: Some(render_target),
             render_target_view,
             path_intermediate_texture,
@@ -833,6 +1357,7 @@ impl DirectXResources {
             path_intermediate_msaa_view,
             viewport,
         ) = create_resources(devices, &self.swap_chain, width, height)?;
+        self.filters = FilterTargets::new(&devices.device, width, height)?;
         self.render_target = Some(render_target);
         self.render_target_view = render_target_view;
         self.path_intermediate_texture = path_intermediate_texture;
@@ -846,6 +1371,41 @@ impl DirectXResources {
 
 impl DirectXRenderPipelines {
     pub fn new(device: &ID3D11Device) -> Result<Self> {
+        let backdrop_pipeline = PipelineState::new(
+            device,
+            "backdrop_pipeline",
+            ShaderModule::Backdrop,
+            16,
+            create_blend_state_premultiplied(device)?,
+        )?;
+        let blur_pipeline = PipelineState::new(
+            device,
+            "blur_pipeline",
+            ShaderModule::Blur,
+            1,
+            create_blend_state_opaque(device)?,
+        )?;
+        let blit_pipeline = PipelineState::new(
+            device,
+            "blit_pipeline",
+            ShaderModule::Blit,
+            1,
+            create_blend_state_opaque(device)?,
+        )?;
+        let composite_pipeline = PipelineState::new(
+            device,
+            "composite_pipeline",
+            ShaderModule::Blit,
+            1,
+            create_blend_state_premultiplied(device)?,
+        )?;
+        let mask_pipeline = PipelineState::new(
+            device,
+            "mask_pipeline",
+            ShaderModule::Mask,
+            1,
+            create_blend_state_premultiplied(device)?,
+        )?;
         let shadow_pipeline = PipelineState::new(
             device,
             "shadow_pipeline",
@@ -904,6 +1464,11 @@ impl DirectXRenderPipelines {
         )?;
 
         Ok(Self {
+            backdrop_pipeline,
+            blur_pipeline,
+            blit_pipeline,
+            composite_pipeline,
+            mask_pipeline,
             shadow_pipeline,
             quad_pipeline,
             path_rasterization_pipeline,
@@ -1382,7 +1947,7 @@ fn set_rasterizer_state(device: &ID3D11Device, device_context: &ID3D11DeviceCont
         DepthBiasClamp: 0.0,
         SlopeScaledDepthBias: 0.0,
         DepthClipEnable: true.into(),
-        ScissorEnable: false.into(),
+        ScissorEnable: true.into(),
         MultisampleEnable: true.into(),
         AntialiasedLineEnable: false.into(),
     };
@@ -1412,6 +1977,80 @@ fn create_blend_state(device: &ID3D11Device) -> Result<ID3D11BlendState> {
         device.CreateBlendState(&desc, Some(&mut state))?;
         Ok(state.unwrap())
     }
+}
+
+/// Layers arrive already multiplied by their own alpha, so their colour must not be scaled again.
+#[inline]
+fn create_blend_state_premultiplied(device: &ID3D11Device) -> Result<ID3D11BlendState> {
+    let mut desc = D3D11_BLEND_DESC::default();
+    desc.RenderTarget[0].BlendEnable = true.into();
+    desc.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
+    desc.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+    desc.RenderTarget[0].SrcBlend = D3D11_BLEND_ONE;
+    desc.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
+    desc.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
+    desc.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
+    desc.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL.0 as u8;
+    unsafe {
+        let mut state = None;
+        device.CreateBlendState(&desc, Some(&mut state))?;
+        Ok(state.unwrap())
+    }
+}
+
+/// Blur and blit passes own every pixel they touch.
+#[inline]
+fn create_blend_state_opaque(device: &ID3D11Device) -> Result<ID3D11BlendState> {
+    let mut desc = D3D11_BLEND_DESC::default();
+    desc.RenderTarget[0].BlendEnable = false.into();
+    desc.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
+    desc.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+    desc.RenderTarget[0].SrcBlend = D3D11_BLEND_ONE;
+    desc.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
+    desc.RenderTarget[0].DestBlend = D3D11_BLEND_ZERO;
+    desc.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ZERO;
+    desc.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL.0 as u8;
+    unsafe {
+        let mut state = None;
+        device.CreateBlendState(&desc, Some(&mut state))?;
+        Ok(state.unwrap())
+    }
+}
+
+#[inline]
+fn create_render_texture(device: &ID3D11Device, width: u32, height: u32) -> Result<RenderTexture> {
+    let texture = unsafe {
+        let mut output = None;
+        let desc = D3D11_TEXTURE2D_DESC {
+            Width: width.max(1),
+            Height: height.max(1),
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: RENDER_TARGET_FORMAT,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Usage: D3D11_USAGE_DEFAULT,
+            BindFlags: (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32,
+            CPUAccessFlags: 0,
+            MiscFlags: 0,
+        };
+        device.CreateTexture2D(&desc, None, Some(&mut output))?;
+        output.unwrap()
+    };
+    let mut view = None;
+    let mut source = None;
+    unsafe {
+        device.CreateRenderTargetView(&texture, None, Some(&mut view))?;
+        device.CreateShaderResourceView(&texture, None, Some(&mut source))?;
+    }
+
+    Ok(RenderTexture {
+        _texture: texture,
+        view,
+        source,
+    })
 }
 
 #[inline]
@@ -1613,6 +2252,10 @@ pub(crate) mod shader_resources {
 
     #[derive(Copy, Clone, Debug, Eq, PartialEq)]
     pub(crate) enum ShaderModule {
+        Backdrop,
+        Blur,
+        Blit,
+        Mask,
         Quad,
         Shadow,
         Underline,
@@ -1663,6 +2306,22 @@ pub(crate) mod shader_resources {
         #[cfg(not(debug_assertions))]
         fn from_bytes(module: ShaderModule, target: ShaderTarget) -> Self {
             let bytes = match module {
+                ShaderModule::Backdrop => match target {
+                    ShaderTarget::Vertex => BACKDROP_VERTEX_BYTES,
+                    ShaderTarget::Fragment => BACKDROP_FRAGMENT_BYTES,
+                },
+                ShaderModule::Blur => match target {
+                    ShaderTarget::Vertex => BLUR_VERTEX_BYTES,
+                    ShaderTarget::Fragment => BLUR_FRAGMENT_BYTES,
+                },
+                ShaderModule::Blit => match target {
+                    ShaderTarget::Vertex => BLIT_VERTEX_BYTES,
+                    ShaderTarget::Fragment => BLIT_FRAGMENT_BYTES,
+                },
+                ShaderModule::Mask => match target {
+                    ShaderTarget::Vertex => MASK_VERTEX_BYTES,
+                    ShaderTarget::Fragment => MASK_FRAGMENT_BYTES,
+                },
                 ShaderModule::Quad => match target {
                     ShaderTarget::Vertex => QUAD_VERTEX_BYTES,
                     ShaderTarget::Fragment => QUAD_FRAGMENT_BYTES,
@@ -1777,6 +2436,10 @@ pub(crate) mod shader_resources {
     impl ShaderModule {
         pub fn as_str(self) -> &'static str {
             match self {
+                ShaderModule::Backdrop => "backdrop",
+                ShaderModule::Blur => "blur",
+                ShaderModule::Blit => "blit",
+                ShaderModule::Mask => "mask",
                 ShaderModule::Quad => "quad",
                 ShaderModule::Shadow => "shadow",
                 ShaderModule::Underline => "underline",

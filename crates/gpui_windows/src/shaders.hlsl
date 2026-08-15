@@ -1266,3 +1266,145 @@ float4 polychrome_sprite_fragment(PolychromeSpriteFragmentInput input): SV_Targe
     color.a *= sprite.opacity * saturate(0.5 - distance);
     return color;
 }
+
+/*
+**
+**              Backdrops
+**
+*/
+
+struct Backdrop {
+    uint order;
+    uint pad;
+    float blur;
+    float opacity;
+    Bounds bounds;
+    Bounds content_mask;
+    Corners corner_radii;
+};
+
+struct BackdropVertexOutput {
+    float4 position: SV_Position;
+    nointerpolation uint backdrop_id: TEXCOORD0;
+    float4 clip_distance: SV_ClipDistance;
+};
+
+struct BackdropFragmentInput {
+    float4 position: SV_Position;
+    nointerpolation uint backdrop_id: TEXCOORD0;
+};
+
+StructuredBuffer<Backdrop> backdrops: register(t1);
+
+BackdropVertexOutput backdrop_vertex(uint vertex_id: SV_VertexID, uint instance_id: SV_InstanceID) {
+    float2 unit_vertex = float2(float(vertex_id & 1u), 0.5 * float(vertex_id & 2u));
+    uint backdrop_id = batch_start_index + instance_id;
+    Backdrop backdrop = backdrops[backdrop_id];
+
+    BackdropVertexOutput output;
+    output.position = to_device_position(unit_vertex, backdrop.bounds);
+    output.backdrop_id = backdrop_id;
+    output.clip_distance = distance_from_clip_rect(unit_vertex, backdrop.bounds, backdrop.content_mask);
+    return output;
+}
+
+float4 backdrop_fragment(BackdropFragmentInput input): SV_Target {
+    Backdrop backdrop = backdrops[input.backdrop_id];
+    float2 position = input.position.xy;
+    float4 sampled = t_sprite.Sample(s_sprite, position / global_viewport_size);
+    float distance = quad_sdf(position, backdrop.bounds, backdrop.corner_radii);
+    float coverage = saturate(0.5 - distance);
+
+    return sampled * coverage * backdrop.opacity;
+}
+
+/*
+**
+**              Layer filters
+**
+*/
+
+struct FilterParams {
+    Bounds bounds;
+    float2 direction;
+    float sigma;
+    float fade_top;
+    float fade_bottom;
+    float3 filter_pad;
+};
+
+struct FilterVertexOutput {
+    float4 position: SV_Position;
+    float2 uv: TEXCOORD0;
+};
+
+struct FilterFragmentInput {
+    float4 position: SV_Position;
+    float2 uv: TEXCOORD0;
+};
+
+StructuredBuffer<FilterParams> filter_params: register(t1);
+
+FilterVertexOutput filter_vertex_impl(uint vertex_id) {
+    float2 unit_vertex = float2(float(vertex_id & 1u), 0.5 * float(vertex_id & 2u));
+
+    FilterVertexOutput output;
+    output.position = float4(unit_vertex.x * 2.0 - 1.0, 1.0 - unit_vertex.y * 2.0, 0.0, 1.0);
+    output.uv = unit_vertex;
+    return output;
+}
+
+FilterVertexOutput blur_vertex(uint vertex_id: SV_VertexID) {
+    return filter_vertex_impl(vertex_id);
+}
+
+FilterVertexOutput blit_vertex(uint vertex_id: SV_VertexID) {
+    return filter_vertex_impl(vertex_id);
+}
+
+FilterVertexOutput mask_vertex(uint vertex_id: SV_VertexID) {
+    return filter_vertex_impl(vertex_id);
+}
+
+float4 blur_fragment(FilterFragmentInput input): SV_Target {
+    FilterParams params = filter_params[batch_start_index];
+    float width;
+    float height;
+    t_sprite.GetDimensions(width, height);
+    float2 step = params.direction / float2(width, height);
+    float sigma = max(params.sigma, 0.0001);
+    float reach = min(ceil(sigma * 3.0), 24.0);
+    float spread = 2.0 * sigma * sigma;
+
+    float4 total = t_sprite.Sample(s_sprite, input.uv);
+    float weight = 1.0;
+    for (float offset = 1.0; offset <= reach; offset += 1.0) {
+        float tap = exp(-offset * offset / spread);
+        total += tap * t_sprite.Sample(s_sprite, input.uv + step * offset);
+        total += tap * t_sprite.Sample(s_sprite, input.uv - step * offset);
+        weight += tap * 2.0;
+    }
+
+    return total / weight;
+}
+
+float4 blit_fragment(FilterFragmentInput input): SV_Target {
+    return t_sprite.Sample(s_sprite, input.uv);
+}
+
+float4 mask_fragment(FilterFragmentInput input): SV_Target {
+    FilterParams params = filter_params[batch_start_index];
+    float2 point = input.uv * global_viewport_size;
+    float top = point.y - params.bounds.origin.y;
+    float bottom = params.bounds.origin.y + params.bounds.size.y - point.y;
+
+    float coverage = 1.0;
+    if (params.fade_top > 0.0) {
+        coverage = min(coverage, smoothstep(0.0, params.fade_top, top));
+    }
+    if (params.fade_bottom > 0.0) {
+        coverage = min(coverage, smoothstep(0.0, params.fade_bottom, bottom));
+    }
+
+    return t_sprite.Sample(s_sprite, input.uv) * coverage;
+}

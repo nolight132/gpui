@@ -30,6 +30,10 @@ mod shader_compilation {
 
         // Define all modules
         let modules = [
+            "backdrop",
+            "blur",
+            "blit",
+            "mask",
             "quad",
             "shadow",
             "path_rasterization",
