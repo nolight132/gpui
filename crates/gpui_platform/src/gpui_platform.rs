@@ -20,16 +20,45 @@ pub fn headless() -> gpui::Application {
 
 /// Returns the default [`Platform`] for the current OS.
 pub fn current_platform(headless: bool) -> Rc<dyn Platform> {
-    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
-    compile_error!(
-        "this fork only carries the Linux backends so far; port a renderer and add it here"
-    );
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "freebsd",
+        target_os = "macos",
+        target_os = "windows"
+    )))]
+    compile_error!("this fork carries no backend for this platform yet");
 
-    gpui_linux::current_platform(headless)
+    #[cfg(target_os = "macos")]
+    {
+        Rc::new(gpui_macos::MacPlatform::new(headless))
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        Rc::new(
+            gpui_windows::WindowsPlatform::new(headless)
+                .expect("failed to initialize Windows platform"),
+        )
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    {
+        gpui_linux::current_platform(headless)
+    }
 }
 
 /// Returns a new [`HeadlessRenderer`] for the current platform, if available.
 #[cfg(feature = "test-support")]
 pub fn current_headless_renderer() -> Option<Box<dyn gpui::PlatformHeadlessRenderer>> {
-    None
+    #[cfg(target_os = "macos")]
+    {
+        Some(Box::new(
+            gpui_macos::metal_renderer::MetalHeadlessRenderer::new(),
+        ))
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
 }
