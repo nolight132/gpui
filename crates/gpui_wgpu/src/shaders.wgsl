@@ -1458,11 +1458,6 @@ fn fs_blit(input: BlurVarying) -> @location(0) vec4<f32> {
     return textureSample(t_sprite, s_sprite, input.uv);
 }
 
-@fragment
-fn fs_erase(input: BlurVarying) -> @location(0) vec4<f32> {
-    return vec4<f32>(0.0);
-}
-
 // --- layer masks --- //
 
 struct Mask {
