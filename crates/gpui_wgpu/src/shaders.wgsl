@@ -1457,3 +1457,32 @@ fn fs_blur(input: BlurVarying) -> @location(0) vec4<f32> {
 fn fs_blit(input: BlurVarying) -> @location(0) vec4<f32> {
     return textureSample(t_sprite, s_sprite, input.uv);
 }
+
+// --- layer masks --- //
+
+struct Mask {
+    bounds: Bounds,
+    fade_top: f32,
+    fade_bottom: f32,
+}
+
+@fragment
+fn fs_mask(input: BlurVarying) -> @location(0) vec4<f32> {
+    let mask = load_mask(0u);
+    let point = input.uv * globals.viewport_size;
+    let top = point.y - mask.bounds.origin.y;
+    let bottom = mask.bounds.origin.y + mask.bounds.size.y - point.y;
+
+    var coverage = 1.0;
+    if (mask.fade_top > 0.0) {
+        coverage = min(coverage, smoothstep(0.0, mask.fade_top, top));
+    }
+    if (mask.fade_bottom > 0.0) {
+        coverage = min(coverage, smoothstep(0.0, mask.fade_bottom, bottom));
+    }
+
+    let sampled = textureSample(t_sprite, s_sprite, input.uv);
+    return sampled * coverage;
+}
+
+

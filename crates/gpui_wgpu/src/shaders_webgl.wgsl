@@ -229,3 +229,9 @@ fn load_backdrop(instance_id: u32) -> Backdrop {
 fn load_blur(instance_id: u32) -> Blur {
     return Blur(vec2<f32>(0.0), 0.0, 0u);
 }
+
+
+// Layer filters are not drawn on the WebGL path; this keeps the module complete.
+fn load_mask(instance_id: u32) -> Mask {
+    return Mask(Bounds(vec2<f32>(0.0), vec2<f32>(0.0)), 0.0, 0.0);
+}

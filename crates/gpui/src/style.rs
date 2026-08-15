@@ -294,6 +294,9 @@ pub struct Style {
     /// Blur whatever is painted behind this element
     pub backdrop_blur: Option<Pixels>,
 
+    /// Draw this element and its subtree offscreen, and put the result through these effects
+    pub filter: LayerFilter,
+
     /// The text style of this element
     #[refineable]
     pub text: TextStyleRefinement,
@@ -433,6 +436,24 @@ pub enum TextAlign {
 
     /// Align the text to the right of the element
     Right,
+}
+
+/// Effects applied to an element and its subtree as a whole, the way CSS filters work.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct LayerFilter {
+    /// Blur the layer by this radius.
+    pub blur: Option<Pixels>,
+    /// Fade the layer out over this distance from its top edge.
+    pub fade_top: Option<Pixels>,
+    /// Fade the layer out over this distance from its bottom edge.
+    pub fade_bottom: Option<Pixels>,
+}
+
+impl LayerFilter {
+    /// Whether the layer would leave its contents untouched.
+    pub fn is_none(&self) -> bool {
+        self.blur.is_none() && self.fade_top.is_none() && self.fade_bottom.is_none()
+    }
 }
 
 /// The properties that can be used to style text in GPUI
@@ -699,6 +720,22 @@ impl Style {
         cx: &mut App,
         continuation: impl FnOnce(&mut Window, &mut App),
     ) {
+        if self.filter.is_none() {
+            return self.paint_sharp(bounds, window, cx, continuation);
+        }
+
+        window.with_filter(bounds, self.filter, |window| {
+            self.paint_sharp(bounds, window, cx, continuation)
+        });
+    }
+
+    fn paint_sharp(
+        &self,
+        bounds: Bounds<Pixels>,
+        window: &mut Window,
+        cx: &mut App,
+        continuation: impl FnOnce(&mut Window, &mut App),
+    ) {
         #[cfg(debug_assertions)]
         if self.debug_below {
             cx.set_global(DebugBelow)
@@ -818,6 +855,7 @@ impl Default for Style {
             corner_radii: Corners::default(),
             box_shadow: Default::default(),
             backdrop_blur: None,
+            filter: LayerFilter::default(),
             text: TextStyleRefinement::default(),
             mouse_cursor: None,
             opacity: None,

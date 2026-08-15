@@ -3,24 +3,26 @@ use crate::Inspector;
 use crate::{
     Action, AnyDrag, AnyElement, AnyImageCache, AnyTooltip, AnyView, App, AppContext, Arena, Asset,
     AsyncWindowContext, AtlasTile, AvailableSpace, Backdrop, Background, BorderStyle, Bounds,
-    BoxShadow,
-    Capslock, Context, Corners, CursorHideMode, CursorStyle, Decorations, DevicePixels,
+    BoxShadow, Capslock, Context, Corners, CursorHideMode, CursorStyle, Decorations, DevicePixels,
     DispatchActionListener, DispatchNodeId, DispatchTree, DisplayId, Edges, Effect, Entity,
-    EntityId, EventEmitter, FileDropEvent, FontId, Global, GlobalElementId, GlyphId, GpuSpecs,
-    Hsla, InputHandler, IsZero, KeyBinding, KeyContext, KeyDownEvent, KeyEvent, Keystroke,
-    KeystrokeEvent, LayoutId, LineLayoutIndex, Modifiers, ModifiersChangedEvent, MonochromeSprite,
-    MouseButton, MouseEvent, MouseMoveEvent, MouseUpEvent, Path, Pixels, PlatformAtlas,
-    PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point, PolychromeSprite,
-    Priority, PromptButton, PromptLevel, Quad, Render, RenderGlyphParams, RenderImage,
-    RenderImageParams, RenderSvgParams, Replay, ResizeEdge, SMOOTH_SVG_SCALE_FACTOR,
-    SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledPixels, Scene, Shadow, SharedString, Size,
-    StrikethroughStyle, Style, SubpixelSprite, SubscriberSet, Subscription, SystemWindowTab,
-    SystemWindowTabController, TabStopMap, TaffyLayoutEngine, Task, TextRenderingMode, TextStyle,
-    TextStyleRefinement, ThermalState, TransformationMatrix, Underline, UnderlineStyle,
-    WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControls, WindowDecorations,
-    WindowOptions, WindowParams, WindowTextSystem, point, prelude::*, profiler, px, rems, size,
-    transparent_black,
+    EntityId, EventEmitter, FileDropEvent, Filter, FontId, Global, GlobalElementId, GlyphId,
+    GpuSpecs, Hsla, InputHandler, IsZero, KeyBinding, KeyContext, KeyDownEvent, KeyEvent,
+    Keystroke, KeystrokeEvent, LayerFilter, LayoutId, LineLayoutIndex, Modifiers,
+    ModifiersChangedEvent, MonochromeSprite, MouseButton, MouseEvent, MouseMoveEvent, MouseUpEvent,
+    Path, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler,
+    PlatformWindow, Point, PolychromeSprite, Priority, PromptButton, PromptLevel, Quad, Render,
+    RenderGlyphParams, RenderImage, RenderImageParams, RenderSvgParams, Replay, ResizeEdge,
+    SMOOTH_SVG_SCALE_FACTOR, SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledPixels, Scene, Shadow,
+    SharedString, Size, StrikethroughStyle, Style, SubpixelSprite, SubscriberSet, Subscription,
+    SystemWindowTab, SystemWindowTabController, TabStopMap, TaffyLayoutEngine, Task,
+    TextRenderingMode, TextStyle, TextStyleRefinement, ThermalState, TransformationMatrix,
+    Underline, UnderlineStyle, WindowAppearance, WindowBackgroundAppearance, WindowBounds,
+    WindowControls, WindowDecorations, WindowOptions, WindowParams, WindowTextSystem, point,
+    prelude::*, profiler, px, rems, size, transparent_black,
 };
+
+/// A gaussian is cut off after three standard deviations.
+const BLUR_REACH: f32 = 3.;
 
 use anyhow::{Context as _, Result, anyhow};
 use collections::{FxHashMap, FxHashSet};
@@ -4182,11 +4184,47 @@ impl Window {
         }
     }
 
+    /// Paints everything the callback draws into an offscreen layer, applies the given effects,
+    /// and composites the result back into the frame.
+    ///
+    /// This method should only be called as part of the paint phase of element drawing.
+    pub fn with_filter<R>(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        filter: LayerFilter,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        self.invalidator.debug_assert_paint();
+
+        let scale_factor = self.scale_factor();
+        let filter = Filter {
+            blur: filter.blur.map_or(0., |blur| blur.0 * scale_factor),
+            fade_top: filter.fade_top.map_or(0., |fade| fade.0 * scale_factor),
+            fade_bottom: filter.fade_bottom.map_or(0., |fade| fade.0 * scale_factor),
+        };
+        if filter.is_noop() {
+            return f(self);
+        }
+
+        let reach = px(filter.blur * BLUR_REACH / scale_factor);
+        self.next_frame
+            .scene
+            .push_filter(bounds.dilate(reach).scale(scale_factor), filter);
+        let result = f(self);
+        self.next_frame.scene.pop_filter();
+        result
+    }
+
     /// Paint one or more quads into the scene for the next frame at the current stacking context.
     /// Blur whatever has already been painted behind the given bounds.
     ///
     /// This method should only be called as part of the paint phase of element drawing.
-    pub fn paint_backdrop(&mut self, bounds: Bounds<Pixels>, corner_radii: Corners<Pixels>, blur: Pixels) {
+    pub fn paint_backdrop(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        corner_radii: Corners<Pixels>,
+        blur: Pixels,
+    ) {
         self.invalidator.debug_assert_paint();
 
         if blur <= Pixels::ZERO {
@@ -4461,7 +4499,9 @@ impl Window {
             .find_map(|refinement| refinement.blur)
             .unwrap_or_default();
 
-        (blur.0 * scale_factor * 4.).round().clamp(0., u8::MAX as f32) as u8
+        (blur.0 * scale_factor * 4.)
+            .round()
+            .clamp(0., u8::MAX as f32) as u8
     }
 
     fn should_use_subpixel_rendering(&self, font_id: FontId, font_size: Pixels) -> bool {

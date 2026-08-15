@@ -2,8 +2,8 @@ use crate::{CompositorGpuHint, WgpuAtlas, WgpuContext};
 use anyhow::{Context as _, Result};
 use bytemuck::{Pod, Zeroable};
 use gpui::{
-    AtlasTextureId, Background, Bounds, DevicePixels, GpuSpecs, Path, Point, PrimitiveBatch,
-    ScaledPixels, Scene, Size, get_gamma_correction_ratios,
+    AtlasTextureId, Background, Bounds, DevicePixels, GpuSpecs, LayerEffect, Path, Point,
+    PrimitiveBatch, ScaledPixels, Scene, Size, get_gamma_correction_ratios,
 };
 use log::warn;
 #[cfg(not(target_family = "wasm"))]
@@ -125,6 +125,8 @@ struct WgpuPipelines {
     backdrops: wgpu::RenderPipeline,
     blur: wgpu::RenderPipeline,
     blit: wgpu::RenderPipeline,
+    composite: wgpu::RenderPipeline,
+    masked: wgpu::RenderPipeline,
     quads: wgpu::RenderPipeline,
     shadows: wgpu::RenderPipeline,
     path_rasterization: wgpu::RenderPipeline,
@@ -203,9 +205,19 @@ struct WgpuResources {
 #[derive(Clone)]
 struct BackdropViews {
     frame: wgpu::TextureView,
+    layers: Vec<wgpu::TextureView>,
     half: wgpu::TextureView,
     quarter: wgpu::TextureView,
     scratch: wgpu::TextureView,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct MaskParams {
+    bounds: [f32; 4],
+    fade_top: f32,
+    fade_bottom: f32,
+    pad: [f32; 2],
 }
 
 #[repr(C)]
@@ -219,10 +231,14 @@ struct BlurParams {
 /// Backdrops are blurred at a quarter of the frame's resolution.
 const BACKDROP_SCALE: f32 = 4.;
 
+/// How deeply filtered layers can nest before the innermost ones stop being filtered.
+const LAYER_DEPTH: usize = 4;
+
 /// Offscreen targets used to blur what has already been drawn.
 struct BackdropTargets {
     frame: wgpu::Texture,
     frame_view: wgpu::TextureView,
+    layers: Vec<(wgpu::Texture, wgpu::TextureView)>,
     half: wgpu::Texture,
     half_view: wgpu::TextureView,
     quarter: wgpu::Texture,
@@ -234,6 +250,9 @@ struct BackdropTargets {
 impl BackdropTargets {
     fn drop_textures(&self) {
         self.frame.destroy();
+        for (texture, _) in &self.layers {
+            texture.destroy();
+        }
         self.half.destroy();
         self.quarter.destroy();
         self.scratch.destroy();
@@ -990,6 +1009,32 @@ impl WgpuRenderer {
             &shader_module,
         );
 
+        let composite = create_pipeline(
+            "composite",
+            "vs_blur",
+            "fs_blit",
+            &layouts.globals,
+            &layouts.instances,
+            Some(&layouts.texture),
+            wgpu::PrimitiveTopology::TriangleStrip,
+            &[Some(color_target.clone())],
+            1,
+            &shader_module,
+        );
+
+        let masked = create_pipeline(
+            "masked",
+            "vs_blur",
+            "fs_mask",
+            &layouts.globals,
+            &layouts.instances,
+            Some(&layouts.texture),
+            wgpu::PrimitiveTopology::TriangleStrip,
+            &[Some(color_target.clone())],
+            1,
+            &shader_module,
+        );
+
         let quads = create_pipeline(
             "quads",
             "vs_quad",
@@ -1153,6 +1198,8 @@ impl WgpuRenderer {
             backdrops,
             blur,
             blit,
+            composite,
+            masked,
             quads,
             shadows,
             path_rasterization,
@@ -1165,10 +1212,73 @@ impl WgpuRenderer {
         }
     }
 
-    fn blur_frame(
+    fn resume_pass<'a>(
+        encoder: &'a mut wgpu::CommandEncoder,
+        label: &'a str,
+        view: &'a wgpu::TextureView,
+        load: wgpu::LoadOp<wgpu::Color>,
+    ) -> wgpu::RenderPass<'a> {
+        encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some(label),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load,
+                    store: wgpu::StoreOp::Store,
+                },
+                depth_slice: None,
+            })],
+            depth_stencil_attachment: None,
+            ..Default::default()
+        })
+    }
+
+    /// Draws a filtered layer back into its parent, clipped to the layer's bounds.
+    fn composite_layer(
+        &self,
+        source: &wgpu::TextureView,
+        bounds: Bounds<ScaledPixels>,
+        masked: bool,
+        instances: &InstanceBinding,
+        pass: &mut wgpu::RenderPass<'_>,
+    ) {
+        let width = self.surface_config.width as f32;
+        let height = self.surface_config.height as f32;
+        let left = bounds.origin.x.0.max(0.).min(width);
+        let top = bounds.origin.y.0.max(0.).min(height);
+        let right = (bounds.origin.x.0 + bounds.size.width.0).max(0.).min(width);
+        let bottom = (bounds.origin.y.0 + bounds.size.height.0)
+            .max(0.)
+            .min(height);
+        if right <= left || bottom <= top {
+            return;
+        }
+
+        let texture = self.create_texture_bind_group("layer_bind_group", source);
+        let resources = self.resources();
+        pass.set_pipeline(match masked {
+            true => &resources.pipelines.masked,
+            false => &resources.pipelines.composite,
+        });
+        pass.set_bind_group(0, &self.resources().globals_bind_group, &[]);
+        pass.set_bind_group(1, &instances.bind_group, &[]);
+        pass.set_bind_group(2, &texture, &[]);
+        pass.set_scissor_rect(
+            left as u32,
+            top as u32,
+            (right - left) as u32,
+            (bottom - top) as u32,
+        );
+        pass.draw(0..4, instances.first_instance..instances.first_instance + 1);
+        pass.set_scissor_rect(0, 0, self.surface_config.width, self.surface_config.height);
+    }
+
+    fn blur_source(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
         views: &BackdropViews,
+        source: &wgpu::TextureView,
         sigma: f32,
         instance_offset: &mut u64,
     ) -> Result<()> {
@@ -1198,7 +1308,7 @@ impl WgpuRenderer {
 
         let blit = self.resources().pipelines.blit.clone();
         let blur = self.resources().pipelines.blur.clone();
-        self.fullscreen_pass(encoder, "backdrop_half", &blit, &views.frame, &views.half, &plain);
+        self.fullscreen_pass(encoder, "backdrop_half", &blit, source, &views.half, &plain);
         self.fullscreen_pass(
             encoder,
             "backdrop_quarter",
@@ -1283,6 +1393,11 @@ impl WgpuRenderer {
         let targets = self.resources().backdrop_targets.as_ref()?;
         Some(BackdropViews {
             frame: targets.frame_view.clone(),
+            layers: targets
+                .layers
+                .iter()
+                .map(|(_, view)| view.clone())
+                .collect(),
             half: targets.half_view.clone(),
             quarter: targets.quarter_view.clone(),
             scratch: targets.scratch_view.clone(),
@@ -1319,6 +1434,9 @@ impl WgpuRenderer {
         };
 
         let (frame, frame_view) = target("backdrop_frame", width, height);
+        let layers = (0..LAYER_DEPTH)
+            .map(|depth| target(&format!("filter_layer_{depth}"), width, height))
+            .collect();
         let (half, half_view) = target("backdrop_half", width / 2, height / 2);
         let (quarter, quarter_view) = target("backdrop_quarter", width / 4, height / 4);
         let (scratch, scratch_view) = target("backdrop_scratch", width / 4, height / 4);
@@ -1326,6 +1444,7 @@ impl WgpuRenderer {
         resources.backdrop_targets = Some(BackdropTargets {
             frame,
             frame_view,
+            layers,
             half,
             half_view,
             quarter,
@@ -1672,10 +1791,14 @@ impl WgpuRenderer {
 
     fn record_frame(&mut self, scene: &Scene, frame_view: &wgpu::TextureView) -> Result<()> {
         let mut instance_offset = 0;
-        if !scene.backdrops.is_empty() && !self.uses_webgl_instance_data {
+        if !(scene.backdrops.is_empty() && scene.effects.is_empty())
+            && !self.uses_webgl_instance_data
+        {
             self.ensure_backdrop_targets();
         }
-        let views = match scene.backdrops.is_empty() || self.uses_webgl_instance_data {
+        let views = match (scene.backdrops.is_empty() && scene.effects.is_empty())
+            || self.uses_webgl_instance_data
+        {
             true => None,
             false => self.backdrop_views(),
         };
@@ -1722,7 +1845,83 @@ impl WgpuRenderer {
                 ..Default::default()
             });
 
+            let mut stack: Vec<usize> = Vec::new();
             for batch in scene.batches() {
+                let wanted = views
+                    .as_ref()
+                    .and_then(|_| scene.filtered(scene.batch_order(&batch)))
+                    .map(|index| scene.filter_chain(index))
+                    .unwrap_or_default();
+
+                let shared = stack
+                    .iter()
+                    .zip(wanted.iter())
+                    .take_while(|(open, next)| open == next)
+                    .count();
+
+                while stack.len() > shared {
+                    let index = stack.pop().expect("the stack is not empty");
+                    let layer = scene.effects[index];
+                    let held = views
+                        .as_ref()
+                        .expect("a filtered layer implies its targets");
+                    let source = &held.layers[stack.len().min(LAYER_DEPTH - 1)];
+                    let onto = match stack.last() {
+                        Some(_) => &held.layers[(stack.len() - 1).min(LAYER_DEPTH - 1)],
+                        None => main_view,
+                    };
+
+                    drop(pass);
+                    if layer.filter.blurs() {
+                        self.blur_source(
+                            &mut encoder,
+                            held,
+                            source,
+                            layer.filter.blur,
+                            &mut instance_offset,
+                        )?;
+                    }
+                    let blurred = match layer.filter.blurs() {
+                        true => &held.quarter,
+                        false => source,
+                    };
+                    let params = self.write_instance_binding(
+                        "layer_composite_bind_group",
+                        &mut instance_offset,
+                        &[mask_params(layer)],
+                    )?;
+                    pass = Self::resume_pass(
+                        &mut encoder,
+                        "layer_composite_pass",
+                        onto,
+                        wgpu::LoadOp::Load,
+                    );
+                    self.composite_layer(
+                        blurred,
+                        layer.bounds,
+                        layer.filter.fades(),
+                        &params,
+                        &mut pass,
+                    );
+                }
+
+                for index in wanted.iter().skip(shared) {
+                    if stack.len() >= LAYER_DEPTH {
+                        break;
+                    }
+                    let held = views
+                        .as_ref()
+                        .expect("a filtered layer implies its targets");
+                    drop(pass);
+                    pass = Self::resume_pass(
+                        &mut encoder,
+                        "layer_pass",
+                        &held.layers[stack.len()],
+                        wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    );
+                    stack.push(*index);
+                }
+
                 match batch {
                     PrimitiveBatch::Quads(range) => self.draw_instances(
                         &instance_bindings.quads,
@@ -1807,7 +2006,7 @@ impl WgpuRenderer {
                         &mut pass,
                     ),
                     PrimitiveBatch::Backdrops(range) => {
-                        let Some(views) = views.clone() else {
+                        let Some(views) = views.as_ref().filter(|_| stack.is_empty()) else {
                             continue;
                         };
                         let sigma = scene.backdrops[range.clone()]
@@ -1815,22 +2014,14 @@ impl WgpuRenderer {
                             .fold(0., |widest: f32, backdrop| widest.max(backdrop.blur));
 
                         drop(pass);
-                        self.blur_frame(&mut encoder, &views, sigma, &mut instance_offset)?;
-
-                        pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                            label: Some("main_pass_continued"),
-                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                                view: main_view,
-                                resolve_target: None,
-                                ops: wgpu::Operations {
-                                    load: wgpu::LoadOp::Load,
-                                    store: wgpu::StoreOp::Store,
-                                },
-                                depth_slice: None,
-                            })],
-                            depth_stencil_attachment: None,
-                            ..Default::default()
-                        });
+                        let frame = views.frame.clone();
+                        self.blur_source(&mut encoder, views, &frame, sigma, &mut instance_offset)?;
+                        pass = Self::resume_pass(
+                            &mut encoder,
+                            "main_pass_continued",
+                            main_view,
+                            wgpu::LoadOp::Load,
+                        );
 
                         self.draw_backdrops(
                             &instance_bindings.backdrops,
@@ -1843,6 +2034,51 @@ impl WgpuRenderer {
                     // implemented by the WGPU renderer.
                     PrimitiveBatch::Surfaces(_surfaces) => {}
                 }
+            }
+
+            while let Some(index) = stack.pop() {
+                let layer = scene.effects[index];
+                let held = views
+                    .as_ref()
+                    .expect("a filtered layer implies its targets");
+                let source = &held.layers[stack.len().min(LAYER_DEPTH - 1)];
+                let onto = match stack.last() {
+                    Some(_) => &held.layers[(stack.len() - 1).min(LAYER_DEPTH - 1)],
+                    None => main_view,
+                };
+
+                drop(pass);
+                if layer.filter.blurs() {
+                    self.blur_source(
+                        &mut encoder,
+                        held,
+                        source,
+                        layer.filter.blur,
+                        &mut instance_offset,
+                    )?;
+                }
+                let blurred = match layer.filter.blurs() {
+                    true => &held.quarter,
+                    false => source,
+                };
+                let params = self.write_instance_binding(
+                    "layer_composite_bind_group",
+                    &mut instance_offset,
+                    &[mask_params(layer)],
+                )?;
+                pass = Self::resume_pass(
+                    &mut encoder,
+                    "layer_composite_pass",
+                    onto,
+                    wgpu::LoadOp::Load,
+                );
+                self.composite_layer(
+                    blurred,
+                    layer.bounds,
+                    layer.filter.fades(),
+                    &params,
+                    &mut pass,
+                );
             }
         }
 
@@ -2465,6 +2701,20 @@ impl WgpuRenderer {
 
         log::info!("GPU recovery complete");
         Ok(())
+    }
+}
+
+fn mask_params(layer: LayerEffect) -> MaskParams {
+    MaskParams {
+        bounds: [
+            layer.bounds.origin.x.0,
+            layer.bounds.origin.y.0,
+            layer.bounds.size.width.0,
+            layer.bounds.size.height.0,
+        ],
+        fade_top: layer.filter.fade_top,
+        fade_bottom: layer.filter.fade_bottom,
+        pad: [0., 0.],
     }
 }
 

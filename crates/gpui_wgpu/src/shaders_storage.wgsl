@@ -14,6 +14,7 @@
 @group(1) @binding(0) var<storage, read> b_poly_sprites: array<PolychromeSprite>;
 @group(1) @binding(0) var<storage, read> b_backdrops: array<Backdrop>;
 @group(1) @binding(0) var<storage, read> b_blurs: array<Blur>;
+@group(1) @binding(0) var<storage, read> b_masks: array<Mask>;
 
 fn load_quad(instance_id: u32) -> Quad {
     return b_quads[instance_id];
@@ -49,4 +50,9 @@ fn load_backdrop(instance_id: u32) -> Backdrop {
 
 fn load_blur(instance_id: u32) -> Blur {
     return b_blurs[instance_id];
+}
+
+
+fn load_mask(instance_id: u32) -> Mask {
+    return b_masks[instance_id];
 }

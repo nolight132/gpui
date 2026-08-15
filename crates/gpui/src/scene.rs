@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     AtlasTextureId, AtlasTile, Background, Bounds, ContentMask, Corners, Edges, Hsla, Pixels,
-    Point, Radians, ScaledPixels, Size, bounds_tree::BoundsTree, point,
+    Point, Radians, ScaledPixels, Size, bounds_tree::BoundsTree, point, size,
 };
 use std::{
     fmt::Debug,
@@ -44,6 +44,8 @@ pub struct Scene {
     layer_stack: Vec<DrawOrder>,
     pub shadows: Vec<Shadow>,
     pub backdrops: Vec<Backdrop>,
+    pub effects: Vec<LayerEffect>,
+    effect_stack: Vec<usize>,
     pub quads: Vec<Quad>,
     pub paths: Vec<Path<ScaledPixels>>,
     pub underlines: Vec<Underline>,
@@ -62,6 +64,8 @@ impl Scene {
         self.paths.clear();
         self.shadows.clear();
         self.backdrops.clear();
+        self.effects.clear();
+        self.effect_stack.clear();
         self.quads.clear();
         self.underlines.clear();
         self.monochrome_sprites.clear();
@@ -84,6 +88,68 @@ impl Scene {
     pub fn pop_layer(&mut self) {
         self.layer_stack.pop();
         self.paint_operations.push(PaintOperation::EndLayer);
+    }
+
+    /// Starts a layer that is drawn offscreen, put through the given filter, and composited back.
+    ///
+    /// The layer takes an order of its own so nothing else can share it: a filtered subtree leaves
+    /// the frame as one texture, and anything painted afterwards has to land on top of it.
+    pub fn push_filter(&mut self, bounds: Bounds<ScaledPixels>, filter: Filter) {
+        let order = self.primitive_bounds.insert(everywhere());
+        self.layer_stack.push(order);
+        self.effects.push(LayerEffect {
+            order,
+            bounds,
+            filter,
+            parent: self.effect_stack.last().copied(),
+        });
+        self.effect_stack.push(self.effects.len() - 1);
+        self.paint_operations
+            .push(PaintOperation::StartFilter(bounds, filter));
+    }
+
+    pub fn pop_filter(&mut self) {
+        self.layer_stack.pop();
+        self.effect_stack.pop();
+        self.paint_operations.push(PaintOperation::EndFilter);
+    }
+
+    /// The draw order of a batch's first primitive.
+    pub fn batch_order(&self, batch: &PrimitiveBatch) -> DrawOrder {
+        match batch {
+            PrimitiveBatch::Shadows(range) => self.shadows[range.start].order,
+            PrimitiveBatch::Backdrops(range) => self.backdrops[range.start].order,
+            PrimitiveBatch::Quads(range) => self.quads[range.start].order,
+            PrimitiveBatch::Paths(range) => self.paths[range.start].order,
+            PrimitiveBatch::Underlines(range) => self.underlines[range.start].order,
+            PrimitiveBatch::MonochromeSprites { range, .. } => {
+                self.monochrome_sprites[range.start].order
+            }
+            PrimitiveBatch::SubpixelSprites { range, .. } => {
+                self.subpixel_sprites[range.start].order
+            }
+            PrimitiveBatch::PolychromeSprites { range, .. } => {
+                self.polychrome_sprites[range.start].order
+            }
+            PrimitiveBatch::Surfaces(range) => self.surfaces[range.start].order,
+        }
+    }
+
+    /// The layer that primitives drawn at the given order belong to, if any.
+    pub fn filtered(&self, order: DrawOrder) -> Option<usize> {
+        self.effects.iter().position(|layer| layer.order == order)
+    }
+
+    /// A layer and everything that encloses it, outermost first.
+    pub fn filter_chain(&self, index: usize) -> Vec<usize> {
+        let mut chain = vec![index];
+        let mut walk = self.effects[index].parent;
+        while let Some(parent) = walk {
+            chain.push(parent);
+            walk = self.effects[parent].parent;
+        }
+        chain.reverse();
+        chain
     }
 
     pub fn insert_primitive(&mut self, primitive: impl Into<Primitive>) {
@@ -150,6 +216,8 @@ impl Scene {
                 PaintOperation::Primitive(primitive) => self.insert_primitive(primitive.clone()),
                 PaintOperation::StartLayer(bounds) => self.push_layer(*bounds),
                 PaintOperation::EndLayer => self.pop_layer(),
+                PaintOperation::StartFilter(bounds, filter) => self.push_filter(*bounds, *filter),
+                PaintOperation::EndFilter => self.pop_filter(),
             }
         }
     }
@@ -225,6 +293,57 @@ pub(crate) enum PaintOperation {
     Primitive(Primitive),
     StartLayer(Bounds<ScaledPixels>),
     EndLayer,
+    StartFilter(Bounds<ScaledPixels>, Filter),
+    EndFilter,
+}
+
+/// Bounds that intersect every primitive, so an order taken with them is above all of them.
+fn everywhere() -> Bounds<ScaledPixels> {
+    Bounds {
+        origin: point(ScaledPixels(-REACH), ScaledPixels(-REACH)),
+        size: size(ScaledPixels(REACH * 2.), ScaledPixels(REACH * 2.)),
+    }
+}
+
+const REACH: f32 = 1e7;
+
+/// A run of primitives that is drawn offscreen, put through [`Effect`], and composited back.
+#[derive(Clone, Copy, Debug)]
+#[expect(missing_docs)]
+pub struct LayerEffect {
+    pub order: DrawOrder,
+    pub bounds: Bounds<ScaledPixels>,
+    pub filter: Filter,
+    /// The enclosing layer, if this one is nested.
+    pub parent: Option<usize>,
+}
+
+/// What a layer does to its contents on the way back into the frame.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Filter {
+    /// The standard deviation of the blur, in scaled pixels.
+    pub blur: f32,
+    /// How far the contents fade out at the top edge, in scaled pixels.
+    pub fade_top: f32,
+    /// How far the contents fade out at the bottom edge, in scaled pixels.
+    pub fade_bottom: f32,
+}
+
+impl Filter {
+    /// Whether the layer changes its contents at all.
+    pub fn is_noop(&self) -> bool {
+        self.blur <= 0. && self.fade_top <= 0. && self.fade_bottom <= 0.
+    }
+
+    /// Whether the layer has to go through the blur passes.
+    pub fn blurs(&self) -> bool {
+        self.blur > 0.
+    }
+
+    /// Whether the layer is masked on its way back.
+    pub fn fades(&self) -> bool {
+        self.fade_top > 0. || self.fade_bottom > 0.
+    }
 }
 
 #[derive(Clone)]

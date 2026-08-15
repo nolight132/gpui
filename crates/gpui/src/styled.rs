@@ -516,6 +516,20 @@ pub trait Styled: Sized {
         self
     }
 
+    /// Blurs this element together with everything inside it.
+    fn blur(mut self, blur: Pixels) -> Self {
+        self.style().filter.get_or_insert_default().blur = Some(blur);
+        self
+    }
+
+    /// Fades this element and its subtree out towards its top and bottom edges.
+    fn fade_edges(mut self, top: Pixels, bottom: Pixels) -> Self {
+        let filter = self.style().filter.get_or_insert_default();
+        filter.fade_top = Some(top);
+        filter.fade_bottom = Some(bottom);
+        self
+    }
+
     /// Blurs whatever is painted behind this element.
     fn backdrop_blur(mut self, blur: Pixels) -> Self {
         self.style().backdrop_blur = Some(blur);

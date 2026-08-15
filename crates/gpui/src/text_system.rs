@@ -351,7 +351,10 @@ impl TextSystem {
                 .rasterize_glyph(params, raster_bounds);
         }
 
-        let sharp = RenderGlyphParams { blur: 0, ..params.clone() };
+        let sharp = RenderGlyphParams {
+            blur: 0,
+            ..params.clone()
+        };
         let bounds = self.raster_bounds(&sharp)?;
         let (size, mask) = self.platform_text_system.rasterize_glyph(&sharp, bounds)?;
         Ok(blurred(size, mask, reach, params.sigma()))
@@ -1237,7 +1240,6 @@ pub fn font_name_with_fallbacks_shared<'a>(
         _ => name,
     }
 }
-
 
 fn grown(bounds: Bounds<DevicePixels>, reach: i32) -> Bounds<DevicePixels> {
     if reach == 0 || bounds.size.width.0 == 0 || bounds.size.height.0 == 0 {
