@@ -206,9 +206,7 @@ struct WgpuResources {
 struct BackdropViews {
     frame: wgpu::TextureView,
     layers: Vec<wgpu::TextureView>,
-    half: wgpu::TextureView,
-    quarter: wgpu::TextureView,
-    scratch: wgpu::TextureView,
+    steps: Vec<[wgpu::TextureView; 2]>,
 }
 
 #[repr(C)]
@@ -228,8 +226,12 @@ struct BlurParams {
     pad: u32,
 }
 
-/// Backdrops are blurred at a quarter of the frame's resolution.
-const BACKDROP_SCALE: f32 = 4.;
+/// The resolutions a blur can run at, as divisors of the frame. A radius picks the first step it
+/// fits within, so small blurs keep every pixel and wide ones stay cheap.
+const BLUR_STEPS: [u32; 3] = [1, 2, 4];
+
+/// A gaussian is cut off after three standard deviations.
+const BLUR_REACH: f32 = 4.;
 
 /// How deeply filtered layers can nest before the innermost ones stop being filtered.
 const LAYER_DEPTH: usize = 4;
@@ -239,12 +241,8 @@ struct BackdropTargets {
     frame: wgpu::Texture,
     frame_view: wgpu::TextureView,
     layers: Vec<(wgpu::Texture, wgpu::TextureView)>,
-    half: wgpu::Texture,
-    half_view: wgpu::TextureView,
-    quarter: wgpu::Texture,
-    quarter_view: wgpu::TextureView,
-    scratch: wgpu::Texture,
-    scratch_view: wgpu::TextureView,
+    /// Ping-pong pairs for the blur passes, one per resolution step.
+    steps: Vec<[(wgpu::Texture, wgpu::TextureView); 2]>,
 }
 
 impl BackdropTargets {
@@ -253,9 +251,11 @@ impl BackdropTargets {
         for (texture, _) in &self.layers {
             texture.destroy();
         }
-        self.half.destroy();
-        self.quarter.destroy();
-        self.scratch.destroy();
+        for pair in &self.steps {
+            for (texture, _) in pair {
+                texture.destroy();
+            }
+        }
     }
 }
 
@@ -1274,6 +1274,10 @@ impl WgpuRenderer {
         pass.set_scissor_rect(0, 0, self.surface_config.width, self.surface_config.height);
     }
 
+    /// Blurs a source into one of the ping-pong targets and returns the one holding the result.
+    ///
+    /// The resolution follows the radius: a small blur stays at full resolution, where downsampling
+    /// would turn text into mush, and only a wide one is worth shrinking first.
     fn blur_source(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
@@ -1281,59 +1285,57 @@ impl WgpuRenderer {
         source: &wgpu::TextureView,
         sigma: f32,
         instance_offset: &mut u64,
-    ) -> Result<()> {
+    ) -> Result<wgpu::TextureView> {
+        let step = BLUR_STEPS
+            .iter()
+            .position(|shrink| sigma <= BLUR_REACH * *shrink as f32)
+            .unwrap_or(BLUR_STEPS.len() - 1);
+        let shrink = BLUR_STEPS[step] as f32;
+
         let plain = self.write_instance_binding(
-            "backdrop_blit_bind_group",
+            "blur_blit_bind_group",
             instance_offset,
             &[BlurParams::default()],
         )?;
         let across = self.write_instance_binding(
-            "backdrop_blur_across_bind_group",
+            "blur_across_bind_group",
             instance_offset,
             &[BlurParams {
                 direction: [1., 0.],
-                sigma: sigma / BACKDROP_SCALE,
+                sigma: sigma / shrink,
                 pad: 0,
             }],
         )?;
         let down = self.write_instance_binding(
-            "backdrop_blur_down_bind_group",
+            "blur_down_bind_group",
             instance_offset,
             &[BlurParams {
                 direction: [0., 1.],
-                sigma: sigma / BACKDROP_SCALE,
+                sigma: sigma / shrink,
                 pad: 0,
             }],
         )?;
 
         let blit = self.resources().pipelines.blit.clone();
         let blur = self.resources().pipelines.blur.clone();
-        self.fullscreen_pass(encoder, "backdrop_half", &blit, source, &views.half, &plain);
-        self.fullscreen_pass(
-            encoder,
-            "backdrop_quarter",
-            &blit,
-            &views.half,
-            &views.quarter,
-            &plain,
-        );
-        self.fullscreen_pass(
-            encoder,
-            "backdrop_blur_across",
-            &blur,
-            &views.quarter,
-            &views.scratch,
-            &across,
-        );
-        self.fullscreen_pass(
-            encoder,
-            "backdrop_blur_down",
-            &blur,
-            &views.scratch,
-            &views.quarter,
-            &down,
-        );
-        Ok(())
+
+        let mut from = source;
+        for shrunk in 0..step {
+            self.fullscreen_pass(
+                encoder,
+                "blur_shrink",
+                &blit,
+                from,
+                &views.steps[shrunk][0],
+                &plain,
+            );
+            from = &views.steps[shrunk][0];
+        }
+
+        let [held, scratch] = &views.steps[step];
+        self.fullscreen_pass(encoder, "blur_across", &blur, from, scratch, &across);
+        self.fullscreen_pass(encoder, "blur_down", &blur, scratch, held, &down);
+        Ok(held.clone())
     }
 
     fn fullscreen_pass(
@@ -1398,9 +1400,11 @@ impl WgpuRenderer {
                 .iter()
                 .map(|(_, view)| view.clone())
                 .collect(),
-            half: targets.half_view.clone(),
-            quarter: targets.quarter_view.clone(),
-            scratch: targets.scratch_view.clone(),
+            steps: targets
+                .steps
+                .iter()
+                .map(|[a, b]| [a.1.clone(), b.1.clone()])
+                .collect(),
         })
     }
 
@@ -1437,20 +1441,21 @@ impl WgpuRenderer {
         let layers = (0..LAYER_DEPTH)
             .map(|depth| target(&format!("filter_layer_{depth}"), width, height))
             .collect();
-        let (half, half_view) = target("backdrop_half", width / 2, height / 2);
-        let (quarter, quarter_view) = target("backdrop_quarter", width / 4, height / 4);
-        let (scratch, scratch_view) = target("backdrop_scratch", width / 4, height / 4);
+        let steps = BLUR_STEPS
+            .iter()
+            .map(|shrink| {
+                [
+                    target(&format!("blur_{shrink}_a"), width / shrink, height / shrink),
+                    target(&format!("blur_{shrink}_b"), width / shrink, height / shrink),
+                ]
+            })
+            .collect();
 
         resources.backdrop_targets = Some(BackdropTargets {
             frame,
             frame_view,
             layers,
-            half,
-            half_view,
-            quarter,
-            quarter_view,
-            scratch,
-            scratch_view,
+            steps,
         });
     }
 
@@ -1872,18 +1877,15 @@ impl WgpuRenderer {
                     };
 
                     drop(pass);
-                    if layer.filter.blurs() {
-                        self.blur_source(
+                    let blurred = match layer.filter.blurs() {
+                        true => self.blur_source(
                             &mut encoder,
                             held,
                             source,
                             layer.filter.blur,
                             &mut instance_offset,
-                        )?;
-                    }
-                    let blurred = match layer.filter.blurs() {
-                        true => &held.quarter,
-                        false => source,
+                        )?,
+                        false => source.clone(),
                     };
                     let params = self.write_instance_binding(
                         "layer_composite_bind_group",
@@ -1897,7 +1899,7 @@ impl WgpuRenderer {
                         wgpu::LoadOp::Load,
                     );
                     self.composite_layer(
-                        blurred,
+                        &blurred,
                         layer.clip,
                         layer.filter.fades(),
                         &params,
@@ -2015,7 +2017,13 @@ impl WgpuRenderer {
 
                         drop(pass);
                         let frame = views.frame.clone();
-                        self.blur_source(&mut encoder, views, &frame, sigma, &mut instance_offset)?;
+                        let blurred = self.blur_source(
+                            &mut encoder,
+                            views,
+                            &frame,
+                            sigma,
+                            &mut instance_offset,
+                        )?;
                         pass = Self::resume_pass(
                             &mut encoder,
                             "main_pass_continued",
@@ -2025,7 +2033,7 @@ impl WgpuRenderer {
 
                         self.draw_backdrops(
                             &instance_bindings.backdrops,
-                            &views.quarter,
+                            &blurred,
                             instance_range(range),
                             &mut pass,
                         );
@@ -2048,18 +2056,15 @@ impl WgpuRenderer {
                 };
 
                 drop(pass);
-                if layer.filter.blurs() {
-                    self.blur_source(
+                let blurred = match layer.filter.blurs() {
+                    true => self.blur_source(
                         &mut encoder,
                         held,
                         source,
                         layer.filter.blur,
                         &mut instance_offset,
-                    )?;
-                }
-                let blurred = match layer.filter.blurs() {
-                    true => &held.quarter,
-                    false => source,
+                    )?,
+                    false => source.clone(),
                 };
                 let params = self.write_instance_binding(
                     "layer_composite_bind_group",
@@ -2073,7 +2078,7 @@ impl WgpuRenderer {
                     wgpu::LoadOp::Load,
                 );
                 self.composite_layer(
-                    blurred,
+                    &blurred,
                     layer.clip,
                     layer.filter.fades(),
                     &params,
