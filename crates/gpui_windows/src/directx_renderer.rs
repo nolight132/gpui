@@ -307,6 +307,9 @@ impl DirectXRenderer {
             device_context
                 .PSSetConstantBuffers(0, Some(slice::from_ref(&self.globals.global_params_buffer)));
         }
+        // The rasterizer clips to the scissor rect, which starts every frame empty.
+        self.reset_scissor()?;
+
         Ok(())
     }
 
