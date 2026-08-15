@@ -13,7 +13,7 @@ path = "src/gpui_platform.rs"
 
 [features]
 default = []
-font-kit = ["gpui_linux/font-kit"]
+font-kit = ["gpui_linux/font-kit", "gpui_macos/font-kit"]
 runtime_shaders = ["gpui_macos/runtime_shaders"]
 test-support = ["gpui/test-support"]
 screen-capture = [
