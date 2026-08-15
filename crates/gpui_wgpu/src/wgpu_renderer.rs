@@ -2193,6 +2193,7 @@ impl WgpuRenderer {
         self.resources()
             .queue
             .submit(std::iter::once(encoder.finish()));
+
         Ok(())
     }
 
