@@ -1890,9 +1890,12 @@ impl WgpuRenderer {
                     label: Some("main_encoder"),
                 });
 
-        let main_view = match &views {
-            Some(views) => &views.frame,
-            None => frame_view,
+        // Layers composite into whatever they are drawn over, so only a backdrop — which samples
+        // the frame itself — is worth routing the whole frame through a texture for.
+        let mirrored = !scene.backdrops.is_empty();
+        let main_view = match (&views, mirrored) {
+            (Some(views), true) => &views.frame,
+            _ => frame_view,
         };
 
         {
@@ -2172,7 +2175,7 @@ impl WgpuRenderer {
             }
         }
 
-        if let Some(views) = &views {
+        if let Some(views) = views.as_ref().filter(|_| mirrored) {
             let plain = self.write_instance_binding(
                 "frame_blit_bind_group",
                 &mut instance_offset,

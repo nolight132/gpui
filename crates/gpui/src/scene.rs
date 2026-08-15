@@ -269,9 +269,12 @@ impl Scene {
     pub fn batches(&self) -> impl Iterator<Item = PrimitiveBatch> + '_ {
         BatchIterator {
             layered: {
+                // A layer whose contents were clipped away holds nothing to redirect, so it does
+                // not get to split a batch.
                 let mut edges: Vec<DrawOrder> = self
                     .effects
                     .iter()
+                    .filter(|layer| layer.end > layer.start + 1)
                     .flat_map(|layer| [layer.start, layer.end])
                     .collect();
                 edges.sort_unstable();
