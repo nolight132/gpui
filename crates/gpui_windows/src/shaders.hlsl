@@ -1371,7 +1371,7 @@ float4 blur_fragment(FilterFragmentInput input): SV_Target {
     float width;
     float height;
     t_sprite.GetDimensions(width, height);
-    float2 step = params.direction / float2(width, height);
+    float2 stride = params.direction / float2(width, height);
     float sigma = max(params.sigma, 0.0001);
     float reach = min(ceil(sigma * 3.0), 24.0);
     float spread = 2.0 * sigma * sigma;
@@ -1380,8 +1380,8 @@ float4 blur_fragment(FilterFragmentInput input): SV_Target {
     float weight = 1.0;
     for (float offset = 1.0; offset <= reach; offset += 1.0) {
         float tap = exp(-offset * offset / spread);
-        total += tap * t_sprite.Sample(s_sprite, input.uv + step * offset);
-        total += tap * t_sprite.Sample(s_sprite, input.uv - step * offset);
+        total += tap * t_sprite.Sample(s_sprite, input.uv + stride * offset);
+        total += tap * t_sprite.Sample(s_sprite, input.uv - stride * offset);
         weight += tap * 2.0;
     }
 
@@ -1394,9 +1394,9 @@ float4 blit_fragment(FilterFragmentInput input): SV_Target {
 
 float4 mask_fragment(FilterFragmentInput input): SV_Target {
     FilterParams params = filter_params[batch_start_index];
-    float2 point = input.uv * global_viewport_size;
-    float top = point.y - params.bounds.origin.y;
-    float bottom = params.bounds.origin.y + params.bounds.size.y - point.y;
+    float2 spot = input.uv * global_viewport_size;
+    float top = spot.y - params.bounds.origin.y;
+    float bottom = params.bounds.origin.y + params.bounds.size.y - spot.y;
 
     float coverage = 1.0;
     if (params.fade_top > 0.0) {
