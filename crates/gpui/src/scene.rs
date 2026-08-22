@@ -92,8 +92,9 @@ impl Scene {
 
     /// Starts a layer that is drawn offscreen, put through the given filter, and composited back.
     ///
-    /// The layer takes an order of its own so nothing else can share it: a filtered subtree leaves
-    /// the frame as one texture, and anything painted afterwards has to land on top of it.
+    /// The layer claims a range of orders nothing outside it can share: the barriers on either end
+    /// keep the rest of the frame out of it, while its contents order among themselves the way
+    /// they would anywhere else, so a quad still covers an image painted before it.
     pub fn push_filter(
         &mut self,
         bounds: Bounds<ScaledPixels>,
@@ -101,7 +102,6 @@ impl Scene {
         filter: Filter,
     ) {
         let start = self.primitive_bounds.barrier();
-        self.layer_stack.push(start);
         self.effects.push(LayerEffect {
             start,
             end: DrawOrder::MAX,
@@ -116,7 +116,6 @@ impl Scene {
     }
 
     pub fn pop_filter(&mut self) {
-        self.layer_stack.pop();
         if let Some(index) = self.effect_stack.pop() {
             self.effects[index].end = self.primitive_bounds.barrier();
         }
