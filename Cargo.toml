@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/collections",
     "crates/gpui",
+    "crates/gpui_apple",
     "crates/gpui_linux",
     "crates/gpui_macos",
     "crates/gpui_macros",
@@ -37,6 +38,7 @@ crossbeam = "0.8.4"
 derive_refineable = { path = "crates/refineable/derive_refineable" }
 dialoguer = { version = "0.12", default-features = false }
 gpui = { path = "crates/gpui", default-features = false }
+gpui_apple = { path = "crates/gpui_apple" }
 gpui_shared_string = { path = "crates/gpui_shared_string" }
 gpui_linux = { path = "crates/gpui_linux", default-features = false }
 gpui_macos = { path = "crates/gpui_macos", default-features = false }
