@@ -1464,6 +1464,8 @@ struct Mask {
     bounds: Bounds,
     fade_top: f32,
     fade_bottom: f32,
+    fade_left: f32,
+    fade_right: f32,
 }
 
 @fragment
@@ -1479,6 +1481,14 @@ fn fs_mask(input: BlurVarying) -> @location(0) vec4<f32> {
     }
     if (mask.fade_bottom > 0.0) {
         coverage = min(coverage, smoothstep(0.0, mask.fade_bottom, bottom));
+    }
+    if (mask.fade_left > 0.0) {
+        let left = point.x - mask.bounds.origin.x;
+        coverage = min(coverage, smoothstep(0.0, mask.fade_left, left));
+    }
+    if (mask.fade_right > 0.0) {
+        let right = mask.bounds.origin.x + mask.bounds.size.x - point.x;
+        coverage = min(coverage, smoothstep(0.0, mask.fade_right, right));
     }
 
     let sampled = textureSample(t_sprite, s_sprite, input.uv);

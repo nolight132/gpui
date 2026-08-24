@@ -1397,6 +1397,14 @@ fragment float4 mask_fragment(
   if (params->fade_bottom > 0.0) {
     coverage = min(coverage, smoothstep(0.0, params->fade_bottom, bottom));
   }
+  if (params->fade_left > 0.0) {
+    float left = point.x - params->bounds.origin.x;
+    coverage = min(coverage, smoothstep(0.0, params->fade_left, left));
+  }
+  if (params->fade_right > 0.0) {
+    float right = params->bounds.origin.x + params->bounds.size.width - point.x;
+    coverage = min(coverage, smoothstep(0.0, params->fade_right, right));
+  }
 
   return source.sample(source_sampler, input.uv) * coverage;
 }

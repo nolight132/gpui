@@ -215,7 +215,8 @@ struct MaskParams {
     bounds: [f32; 4],
     fade_top: f32,
     fade_bottom: f32,
-    pad: [f32; 2],
+    fade_left: f32,
+    fade_right: f32,
 }
 
 #[repr(C)]
@@ -2809,7 +2810,8 @@ fn mask_params(layer: LayerEffect) -> MaskParams {
         ],
         fade_top: layer.filter.fade_top,
         fade_bottom: layer.filter.fade_bottom,
-        pad: [0., 0.],
+        fade_left: layer.filter.fade_left,
+        fade_right: layer.filter.fade_right,
     }
 }
 

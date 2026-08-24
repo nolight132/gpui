@@ -4111,6 +4111,8 @@ impl Window {
             blur: filter.blur.map_or(0., |blur| blur.0 * scale_factor),
             fade_top: filter.fade_top.map_or(0., |fade| fade.0 * scale_factor),
             fade_bottom: filter.fade_bottom.map_or(0., |fade| fade.0 * scale_factor),
+            fade_left: filter.fade_left.map_or(0., |fade| fade.0 * scale_factor),
+            fade_right: filter.fade_right.map_or(0., |fade| fade.0 * scale_factor),
         };
         if filter.is_noop() {
             return f(self);

@@ -447,12 +447,20 @@ pub struct LayerFilter {
     pub fade_top: Option<Pixels>,
     /// Fade the layer out over this distance from its bottom edge.
     pub fade_bottom: Option<Pixels>,
+    /// Fade the layer out over this distance from its left edge.
+    pub fade_left: Option<Pixels>,
+    /// Fade the layer out over this distance from its right edge.
+    pub fade_right: Option<Pixels>,
 }
 
 impl LayerFilter {
     /// Whether the layer would leave its contents untouched.
     pub fn is_none(&self) -> bool {
-        self.blur.is_none() && self.fade_top.is_none() && self.fade_bottom.is_none()
+        self.blur.is_none()
+            && self.fade_top.is_none()
+            && self.fade_bottom.is_none()
+            && self.fade_left.is_none()
+            && self.fade_right.is_none()
     }
 }
 

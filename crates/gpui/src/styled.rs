@@ -530,6 +530,14 @@ pub trait Styled: Sized {
         self
     }
 
+    /// Fades this element and its subtree out towards its left and right edges.
+    fn fade_sides(mut self, left: Pixels, right: Pixels) -> Self {
+        let filter = self.style().filter.get_or_insert_default();
+        filter.fade_left = Some(left);
+        filter.fade_right = Some(right);
+        self
+    }
+
     /// Blurs whatever is painted behind this element.
     fn backdrop_blur(mut self, blur: Pixels) -> Self {
         self.style().backdrop_blur = Some(blur);

@@ -355,12 +355,16 @@ pub struct Filter {
     pub fade_top: f32,
     /// How far the contents fade out at the bottom edge, in scaled pixels.
     pub fade_bottom: f32,
+    /// How far the contents fade out at the left edge, in scaled pixels.
+    pub fade_left: f32,
+    /// How far the contents fade out at the right edge, in scaled pixels.
+    pub fade_right: f32,
 }
 
 impl Filter {
     /// Whether the layer changes its contents at all.
     pub fn is_noop(&self) -> bool {
-        self.blur <= 0. && self.fade_top <= 0. && self.fade_bottom <= 0.
+        self.blur <= 0. && !self.fades()
     }
 
     /// Whether the layer has to go through the blur passes.
@@ -370,7 +374,7 @@ impl Filter {
 
     /// Whether the layer is masked on its way back.
     pub fn fades(&self) -> bool {
-        self.fade_top > 0. || self.fade_bottom > 0.
+        self.fade_top > 0. || self.fade_bottom > 0. || self.fade_left > 0. || self.fade_right > 0.
     }
 }
 

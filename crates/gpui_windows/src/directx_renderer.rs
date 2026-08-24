@@ -138,7 +138,9 @@ struct FilterParams {
     sigma: f32,
     fade_top: f32,
     fade_bottom: f32,
-    pad: [f32; 3],
+    fade_left: f32,
+    fade_right: f32,
+    pad: f32,
 }
 
 #[derive(Clone, Copy)]
@@ -413,6 +415,8 @@ impl DirectXRenderer {
             bounds: clip,
             fade_top: layer.filter.fade_top,
             fade_bottom: layer.filter.fade_bottom,
+            fade_left: layer.filter.fade_left,
+            fade_right: layer.filter.fade_right,
             ..Default::default()
         }];
 

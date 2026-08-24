@@ -1330,7 +1330,9 @@ struct FilterParams {
     float sigma;
     float fade_top;
     float fade_bottom;
-    float3 filter_pad;
+    float fade_left;
+    float fade_right;
+    float filter_pad;
 };
 
 struct FilterVertexOutput {
@@ -1404,6 +1406,14 @@ float4 mask_fragment(FilterFragmentInput input): SV_Target {
     }
     if (params.fade_bottom > 0.0) {
         coverage = min(coverage, smoothstep(0.0, params.fade_bottom, bottom));
+    }
+    if (params.fade_left > 0.0) {
+        float left = spot.x - params.bounds.origin.x;
+        coverage = min(coverage, smoothstep(0.0, params.fade_left, left));
+    }
+    if (params.fade_right > 0.0) {
+        float right = params.bounds.origin.x + params.bounds.size.x - spot.x;
+        coverage = min(coverage, smoothstep(0.0, params.fade_right, right));
     }
 
     return t_sprite.Sample(s_sprite, input.uv) * coverage;

@@ -1810,6 +1810,8 @@ pub struct MaskParams {
     pub bounds: Bounds<ScaledPixels>,
     pub fade_top: f32,
     pub fade_bottom: f32,
+    pub fade_left: f32,
+    pub fade_right: f32,
 }
 
 #[repr(C)]
@@ -1826,6 +1828,8 @@ fn mask_params(layer: LayerEffect) -> MaskParams {
         bounds: layer.clip,
         fade_top: layer.filter.fade_top,
         fade_bottom: layer.filter.fade_bottom,
+        fade_left: layer.filter.fade_left,
+        fade_right: layer.filter.fade_right,
     }
 }
 
