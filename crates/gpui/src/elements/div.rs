@@ -5194,4 +5194,58 @@ mod tests {
         assert_eq!(bounds("cell-1").origin.x, px(100.));
         assert_eq!(bounds("cell-2").origin.x, px(300.));
     }
+
+    #[gpui::test]
+    fn layer_scale_does_not_change_layout_bounds(cx: &mut TestAppContext) {
+        let window = cx.add_empty_window();
+        let element = |scale| {
+            div()
+                .debug_selector(|| "scaled-root".into())
+                .flex()
+                .w(px(240.0))
+                .h(px(120.0))
+                .layer_scale(scale)
+                .child(
+                    div()
+                        .debug_selector(|| "fixed-child".into())
+                        .w(px(80.0))
+                        .h_full()
+                        .child("This text keeps the same wrapping width"),
+                )
+                .child(
+                    div()
+                        .debug_selector(|| "flex-child".into())
+                        .flex_1()
+                        .h_full(),
+                )
+        };
+
+        window.draw(
+            point(px(10.0), px(20.0)),
+            size(px(400.0), px(300.0)),
+            |_, _| element(1.0),
+        );
+        let (unscaled_bounds, unscaled_effects) = window.update(|window, _| {
+            (
+                window.rendered_frame.debug_bounds.clone(),
+                window.rendered_frame.scene.effects.len(),
+            )
+        });
+
+        window.draw(
+            point(px(10.0), px(20.0)),
+            size(px(400.0), px(300.0)),
+            |_, _| element(0.9973),
+        );
+        let (scaled_bounds, scaled_effects) = window.update(|window, _| {
+            (
+                window.rendered_frame.debug_bounds.clone(),
+                window.rendered_frame.scene.effects.len(),
+            )
+        });
+
+        assert_eq!(unscaled_bounds, scaled_bounds);
+        assert_eq!(unscaled_effects, 0);
+        assert_eq!(scaled_effects, 1);
+    }
 }

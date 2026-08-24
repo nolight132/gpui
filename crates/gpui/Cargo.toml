@@ -189,6 +189,10 @@ name = "opacity"
 path = "examples/opacity.rs"
 
 [[example]]
+name = "layer_scale"
+path = "examples/layer_scale.rs"
+
+[[example]]
 name = "pattern"
 path = "examples/pattern.rs"
 

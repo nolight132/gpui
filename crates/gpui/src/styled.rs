@@ -538,6 +538,21 @@ pub trait Styled: Sized {
         self
     }
 
+    /// Uniformly scales this element and its subtree as one composited image around the center of
+    /// the element's original bounds.
+    ///
+    /// This is a paint-only effect. It does not change layout bounds, available space, text
+    /// wrapping, child sizes, or hitboxes. The scale must be finite and greater than zero.
+    /// The current WebGL renderer does not composite layer filters.
+    fn layer_scale(mut self, scale: f32) -> Self {
+        assert!(
+            scale.is_finite() && scale > 0.0,
+            "layer scale must be finite and greater than zero"
+        );
+        self.style().filter.get_or_insert_default().scale = Some(scale);
+        self
+    }
+
     /// Blurs whatever is painted behind this element.
     fn backdrop_blur(mut self, blur: Pixels) -> Self {
         self.style().backdrop_blur = Some(blur);

@@ -4107,21 +4107,31 @@ impl Window {
         self.invalidator.debug_assert_paint();
 
         let scale_factor = self.scale_factor();
+        if let Some(scale) = filter.scale {
+            assert!(
+                scale.is_finite() && scale > 0.0,
+                "layer scale must be finite and greater than zero"
+            );
+        }
         let filter = Filter {
             blur: filter.blur.map_or(0., |blur| blur.0 * scale_factor),
             fade_top: filter.fade_top.map_or(0., |fade| fade.0 * scale_factor),
             fade_bottom: filter.fade_bottom.map_or(0., |fade| fade.0 * scale_factor),
             fade_left: filter.fade_left.map_or(0., |fade| fade.0 * scale_factor),
             fade_right: filter.fade_right.map_or(0., |fade| fade.0 * scale_factor),
+            scale: filter.scale.unwrap_or(1.0),
         };
         if filter.is_noop() {
             return f(self);
         }
 
-        let reach = px(filter.blur * BLUR_REACH / scale_factor);
-        let bounds = bounds.dilate(reach).scale(scale_factor);
-        let clip = bounds.intersect(&self.snapped_content_mask().bounds);
-        self.next_frame.scene.push_filter(bounds, clip, filter);
+        let element_bounds = bounds.scale(scale_factor);
+        let transform_origin = element_bounds.center();
+        let source_bounds = element_bounds.dilate(ScaledPixels(filter.blur * BLUR_REACH));
+        let content_mask = self.snapped_content_mask().bounds;
+        self.next_frame
+            .scene
+            .push_filter(source_bounds, transform_origin, content_mask, filter);
         let result = f(self);
         self.next_frame.scene.pop_filter();
         result

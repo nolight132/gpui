@@ -1386,9 +1386,20 @@ fragment float4 mask_fragment(
   constexpr sampler source_sampler(mag_filter::linear, min_filter::linear,
                                    address::clamp_to_edge);
   float2 extent = float2(float(viewport_size->width), float(viewport_size->height));
-  float2 point = input.uv * extent;
-  float top = point.y - params->bounds.origin.y;
-  float bottom = params->bounds.origin.y + params->bounds.size.height - point.y;
+  float2 destination_point = input.position.xy;
+  float2 origin = float2(params->transform_origin[0], params->transform_origin[1]);
+  float2 source_point = origin + (destination_point - origin) / params->scale;
+  float2 source_origin = float2(params->source_bounds.origin.x,
+                                params->source_bounds.origin.y);
+  float2 source_end = source_origin + float2(params->source_bounds.size.width,
+                                              params->source_bounds.size.height);
+  if (any(source_point < source_origin) || any(source_point >= source_end) ||
+      any(source_point < float2(0.0)) || any(source_point >= extent)) {
+    return float4(0.0);
+  }
+
+  float top = source_point.y - params->fade_bounds.origin.y;
+  float bottom = params->fade_bounds.origin.y + params->fade_bounds.size.height - source_point.y;
 
   float coverage = 1.0;
   if (params->fade_top > 0.0) {
@@ -1398,13 +1409,13 @@ fragment float4 mask_fragment(
     coverage = min(coverage, smoothstep(0.0, params->fade_bottom, bottom));
   }
   if (params->fade_left > 0.0) {
-    float left = point.x - params->bounds.origin.x;
+    float left = source_point.x - params->fade_bounds.origin.x;
     coverage = min(coverage, smoothstep(0.0, params->fade_left, left));
   }
   if (params->fade_right > 0.0) {
-    float right = params->bounds.origin.x + params->bounds.size.width - point.x;
+    float right = params->fade_bounds.origin.x + params->fade_bounds.size.width - source_point.x;
     coverage = min(coverage, smoothstep(0.0, params->fade_right, right));
   }
 
-  return source.sample(source_sampler, input.uv) * coverage;
+  return source.sample(source_sampler, source_point / extent) * coverage;
 }

@@ -133,15 +133,33 @@ impl FilterTargets {
 #[derive(Clone, Copy, Default)]
 #[repr(C)]
 struct FilterParams {
-    bounds: Bounds<ScaledPixels>,
+    source_bounds: Bounds<ScaledPixels>,
+    fade_bounds: Bounds<ScaledPixels>,
     direction: [f32; 2],
+    transform_origin: [f32; 2],
     sigma: f32,
+    scale: f32,
     fade_top: f32,
     fade_bottom: f32,
     fade_left: f32,
     fade_right: f32,
-    pad: f32,
+    pad: [f32; 2],
 }
+
+const _: () = {
+    assert!(std::mem::size_of::<FilterParams>() == 20 * std::mem::size_of::<f32>());
+    assert!(std::mem::offset_of!(FilterParams, source_bounds) == 0);
+    assert!(std::mem::offset_of!(FilterParams, fade_bounds) == 16);
+    assert!(std::mem::offset_of!(FilterParams, direction) == 32);
+    assert!(std::mem::offset_of!(FilterParams, transform_origin) == 40);
+    assert!(std::mem::offset_of!(FilterParams, sigma) == 48);
+    assert!(std::mem::offset_of!(FilterParams, scale) == 52);
+    assert!(std::mem::offset_of!(FilterParams, fade_top) == 56);
+    assert!(std::mem::offset_of!(FilterParams, fade_bottom) == 60);
+    assert!(std::mem::offset_of!(FilterParams, fade_left) == 64);
+    assert!(std::mem::offset_of!(FilterParams, fade_right) == 68);
+    assert!(std::mem::offset_of!(FilterParams, pad) == 72);
+};
 
 #[derive(Clone, Copy)]
 enum Pass {
@@ -398,7 +416,7 @@ impl DirectXRenderer {
                 .clone()
         };
         let blurred = match layer.filter.blurs() {
-            true => self.blur_source(source, layer.filter.blur, Some(clip))?,
+            true => self.blur_source(source, layer.filter.blur, Some(layer.blur_bounds(clip)))?,
             false => source,
         };
 
@@ -406,13 +424,26 @@ impl DirectXRenderer {
             Some(onto) => self.open_target(Some(onto))?,
             None => self.restore_frame(mirrored)?,
         }
-        let Some(within) = self.scissor(clip, 1)? else {
+        let Some(within) = self.scissor(layer.destination_scissor_bounds(clip), 1)? else {
             return Ok(());
         };
 
         let (device, device_context, sampler, batch_params) = self.pipeline_handles()?;
         let params = [FilterParams {
-            bounds: clip,
+            source_bounds: if layer.filter.scales() {
+                layer.source_bounds
+            } else {
+                clip
+            },
+            // Preserve the existing DirectX fade clip for unscaled layers. A scaled layer applies
+            // the fade in source coordinates before the final transform.
+            fade_bounds: if layer.filter.scales() {
+                layer.source_bounds
+            } else {
+                clip
+            },
+            transform_origin: [layer.transform_origin.x.0, layer.transform_origin.y.0],
+            scale: layer.filter.scale,
             fade_top: layer.filter.fade_top,
             fade_bottom: layer.filter.fade_bottom,
             fade_left: layer.filter.fade_left,
@@ -794,6 +825,7 @@ impl DirectXRenderer {
         // share one target, so a list of separately blurred rows costs one pass, not one per row.
         let mut spans: Vec<Bounds<ScaledPixels>> = Vec::new();
         let mut cleared = [false; LAYER_DEPTH];
+        let mut transformed_target = [false; LAYER_DEPTH];
 
         let annotation = self
             .devices
@@ -824,12 +856,9 @@ impl DirectXRenderer {
                 {
                     let next = scene.effects[wanted[shared]];
                     let layer = scene.effects[*open];
-                    if next.filter == layer.filter
-                        && next.parent == layer.parent
-                        && !next.filter.fades()
-                    {
+                    if layer.can_merge_with(&next) {
                         *open = wanted[shared];
-                        *span = span.union(&next.clip);
+                        *span = span.union(&next.destination_clip());
                         merged = true;
                         break;
                     }
@@ -837,7 +866,7 @@ impl DirectXRenderer {
 
                 let index = stack.pop().expect("the stack is not empty");
                 let layer = scene.effects[index];
-                let clip = spans.pop().unwrap_or(layer.clip);
+                let clip = spans.pop().unwrap_or_else(|| layer.destination_clip());
                 self.close_layer(&stack, layer, clip, mirrored)?;
             }
 
@@ -847,13 +876,13 @@ impl DirectXRenderer {
                 }
                 let layer = scene.effects[*index];
                 let depth = stack.len();
-                // The target is wiped the first time a frame reaches this depth. Layers that share
-                // it afterwards sit side by side, so clearing again would eat what the one before
-                // drew.
-                self.open_layer(depth, !cleared[depth])?;
+                let should_clear =
+                    !cleared[depth] || layer.filter.scales() || transformed_target[depth];
+                self.open_layer(depth, should_clear)?;
                 cleared[depth] = true;
+                transformed_target[depth] = layer.filter.scales();
                 stack.push(*index);
-                spans.push(layer.clip);
+                spans.push(layer.destination_clip());
             }
 
             match batch {
@@ -903,7 +932,7 @@ impl DirectXRenderer {
 
         while let Some(index) = stack.pop() {
             let layer = scene.effects[index];
-            let clip = spans.pop().unwrap_or(layer.clip);
+            let clip = spans.pop().unwrap_or_else(|| layer.destination_clip());
             self.close_layer(&stack, layer, clip, mirrored)?;
         }
 
@@ -1402,7 +1431,7 @@ impl DirectXRenderPipelines {
         let composite_pipeline = PipelineState::new(
             device,
             "composite_pipeline",
-            ShaderModule::Blit,
+            ShaderModule::Mask,
             1,
             create_blend_state_premultiplied(device)?,
         )?;

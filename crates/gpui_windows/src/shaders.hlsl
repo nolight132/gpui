@@ -1325,14 +1325,17 @@ float4 backdrop_fragment(BackdropFragmentInput input): SV_Target {
 */
 
 struct FilterParams {
-    Bounds bounds;
+    Bounds source_bounds;
+    Bounds fade_bounds;
     float2 direction;
+    float2 transform_origin;
     float sigma;
+    float scale;
     float fade_top;
     float fade_bottom;
     float fade_left;
     float fade_right;
-    float filter_pad;
+    float2 filter_pad;
 };
 
 struct FilterVertexOutput {
@@ -1396,9 +1399,19 @@ float4 blit_fragment(FilterFragmentInput input): SV_Target {
 
 float4 mask_fragment(FilterFragmentInput input): SV_Target {
     FilterParams params = filter_params[batch_start_index];
-    float2 spot = input.uv * global_viewport_size;
-    float top = spot.y - params.bounds.origin.y;
-    float bottom = params.bounds.origin.y + params.bounds.size.y - spot.y;
+    float2 destination_point = input.position.xy;
+    float2 source_point = params.transform_origin
+        + (destination_point - params.transform_origin) / params.scale;
+    float2 source_end = params.source_bounds.origin + params.source_bounds.size;
+    if (any(source_point < params.source_bounds.origin)
+        || any(source_point >= source_end)
+        || any(source_point < float2(0.0, 0.0))
+        || any(source_point >= global_viewport_size)) {
+        return float4(0.0);
+    }
+
+    float top = source_point.y - params.fade_bounds.origin.y;
+    float bottom = params.fade_bounds.origin.y + params.fade_bounds.size.y - source_point.y;
 
     float coverage = 1.0;
     if (params.fade_top > 0.0) {
@@ -1408,13 +1421,13 @@ float4 mask_fragment(FilterFragmentInput input): SV_Target {
         coverage = min(coverage, smoothstep(0.0, params.fade_bottom, bottom));
     }
     if (params.fade_left > 0.0) {
-        float left = spot.x - params.bounds.origin.x;
+        float left = source_point.x - params.fade_bounds.origin.x;
         coverage = min(coverage, smoothstep(0.0, params.fade_left, left));
     }
     if (params.fade_right > 0.0) {
-        float right = params.bounds.origin.x + params.bounds.size.x - spot.x;
+        float right = params.fade_bounds.origin.x + params.fade_bounds.size.x - source_point.x;
         coverage = min(coverage, smoothstep(0.0, params.fade_right, right));
     }
 
-    return t_sprite.Sample(s_sprite, input.uv) * coverage;
+    return t_sprite.Sample(s_sprite, source_point / global_viewport_size) * coverage;
 }

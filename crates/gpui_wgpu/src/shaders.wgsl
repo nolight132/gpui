@@ -1461,19 +1461,33 @@ fn fs_blit(input: BlurVarying) -> @location(0) vec4<f32> {
 // --- layer masks --- //
 
 struct Mask {
-    bounds: Bounds,
+    source_bounds: Bounds,
+    fade_bounds: Bounds,
+    transform_origin: vec2<f32>,
+    scale: f32,
     fade_top: f32,
     fade_bottom: f32,
     fade_left: f32,
     fade_right: f32,
+    pad: f32,
 }
 
 @fragment
 fn fs_mask(input: BlurVarying) -> @location(0) vec4<f32> {
     let mask = load_mask(0u);
-    let point = input.uv * globals.viewport_size;
-    let top = point.y - mask.bounds.origin.y;
-    let bottom = mask.bounds.origin.y + mask.bounds.size.y - point.y;
+    let destination_point = input.position.xy;
+    let source_point = mask.transform_origin
+        + (destination_point - mask.transform_origin) / mask.scale;
+    let source_end = mask.source_bounds.origin + mask.source_bounds.size;
+    if (any(source_point < mask.source_bounds.origin)
+        || any(source_point >= source_end)
+        || any(source_point < vec2<f32>(0.0))
+        || any(source_point >= globals.viewport_size)) {
+        return vec4<f32>(0.0);
+    }
+
+    let top = source_point.y - mask.fade_bounds.origin.y;
+    let bottom = mask.fade_bounds.origin.y + mask.fade_bounds.size.y - source_point.y;
 
     var coverage = 1.0;
     if (mask.fade_top > 0.0) {
@@ -1483,16 +1497,14 @@ fn fs_mask(input: BlurVarying) -> @location(0) vec4<f32> {
         coverage = min(coverage, smoothstep(0.0, mask.fade_bottom, bottom));
     }
     if (mask.fade_left > 0.0) {
-        let left = point.x - mask.bounds.origin.x;
+        let left = source_point.x - mask.fade_bounds.origin.x;
         coverage = min(coverage, smoothstep(0.0, mask.fade_left, left));
     }
     if (mask.fade_right > 0.0) {
-        let right = mask.bounds.origin.x + mask.bounds.size.x - point.x;
+        let right = mask.fade_bounds.origin.x + mask.fade_bounds.size.x - source_point.x;
         coverage = min(coverage, smoothstep(0.0, mask.fade_right, right));
     }
 
-    let sampled = textureSample(t_sprite, s_sprite, input.uv);
+    let sampled = textureSample(t_sprite, s_sprite, source_point / globals.viewport_size);
     return sampled * coverage;
 }
-
-

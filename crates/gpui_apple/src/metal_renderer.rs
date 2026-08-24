@@ -369,7 +369,7 @@ impl MetalRenderer {
             &library,
             "composite",
             "filter_vertex",
-            "blit_fragment",
+            "mask_fragment",
             MTLPixelFormat::BGRA8Unorm,
             true,
         );
@@ -748,6 +748,7 @@ impl MetalRenderer {
         // share one target, so a list of separately blurred rows costs one pass, not one per row.
         let mut spans: Vec<Bounds<ScaledPixels>> = Vec::new();
         let mut cleared = [false; LAYER_DEPTH];
+        let mut transformed_target = [false; LAYER_DEPTH];
 
         for batch in scene.batches() {
             let wanted = held
@@ -769,12 +770,9 @@ impl MetalRenderer {
                 {
                     let next = scene.effects[wanted[shared]];
                     let layer = scene.effects[*open];
-                    if next.filter == layer.filter
-                        && next.parent == layer.parent
-                        && !next.filter.fades()
-                    {
+                    if layer.can_merge_with(&next) {
                         *open = wanted[shared];
-                        *span = span.union(&next.clip);
+                        *span = span.union(&next.destination_clip());
                         merged = true;
                         break;
                     }
@@ -783,7 +781,7 @@ impl MetalRenderer {
                 let index = stack.pop().expect("the stack is not empty");
                 let held = held.expect("a filtered layer implies its targets");
                 let layer = scene.effects[index];
-                let clip = spans.pop().unwrap_or(layer.clip);
+                let clip = spans.pop().unwrap_or_else(|| layer.destination_clip());
                 let source: &metal::TextureRef = &held.layers[stack.len().min(LAYER_DEPTH - 1)];
                 let onto: &metal::TextureRef = match stack.last() {
                     Some(_) => &held.layers[(stack.len() - 1).min(LAYER_DEPTH - 1)],
@@ -797,7 +795,7 @@ impl MetalRenderer {
                         command_buffer,
                         source,
                         layer.filter.blur,
-                        Some(clip),
+                        Some(layer.blur_bounds(clip)),
                         viewport_size,
                     ),
                     false => source,
@@ -814,14 +812,14 @@ impl MetalRenderer {
                 let held = held.expect("a filtered layer implies its targets");
                 let layer = scene.effects[*index];
                 let depth = stack.len();
-                // The target is wiped the first time a frame reaches this depth. Layers that share
-                // it afterwards sit side by side, so clearing again would eat what the one before
-                // drew.
-                let clear = match cleared[depth] {
-                    true => None,
-                    false => Some(metal::MTLClearColor::new(0., 0., 0., 0.)),
+                let should_clear =
+                    !cleared[depth] || layer.filter.scales() || transformed_target[depth];
+                let clear = match should_clear {
+                    true => Some(metal::MTLClearColor::new(0., 0., 0., 0.)),
+                    false => None,
                 };
                 cleared[depth] = true;
+                transformed_target[depth] = layer.filter.scales();
 
                 command_encoder.end_encoding();
                 command_encoder = new_command_encoder_for_texture(
@@ -831,7 +829,7 @@ impl MetalRenderer {
                     clear,
                 );
                 stack.push(*index);
-                spans.push(layer.clip);
+                spans.push(layer.destination_clip());
             }
 
             match batch {
@@ -932,7 +930,7 @@ impl MetalRenderer {
         while let Some(index) = stack.pop() {
             let held = held.expect("a filtered layer implies its targets");
             let layer = scene.effects[index];
-            let clip = spans.pop().unwrap_or(layer.clip);
+            let clip = spans.pop().unwrap_or_else(|| layer.destination_clip());
             let source: &metal::TextureRef = &held.layers[stack.len().min(LAYER_DEPTH - 1)];
             let onto: &metal::TextureRef = match stack.last() {
                 Some(_) => &held.layers[(stack.len() - 1).min(LAYER_DEPTH - 1)],
@@ -946,7 +944,7 @@ impl MetalRenderer {
                     command_buffer,
                     source,
                     layer.filter.blur,
-                    Some(clip),
+                    Some(layer.blur_bounds(clip)),
                     viewport_size,
                 ),
                 false => source,
@@ -1165,7 +1163,8 @@ impl MetalRenderer {
         clip: Bounds<ScaledPixels>,
         viewport_size: Size<DevicePixels>,
     ) {
-        let Some(within) = Self::scissor(clip, viewport_size, 1) else {
+        let Some(within) = Self::scissor(layer.destination_scissor_bounds(clip), viewport_size, 1)
+        else {
             return;
         };
         let masked = layer.filter.fades();
@@ -1180,14 +1179,12 @@ impl MetalRenderer {
             mem::size_of_val(&viewport_size) as u64,
             &viewport_size as *const Size<DevicePixels> as *const _,
         );
-        if masked {
-            let params = mask_params(layer);
-            encoder.set_fragment_bytes(
-                FilterInputIndex::Params as u64,
-                mem::size_of::<MaskParams>() as u64,
-                &params as *const MaskParams as *const _,
-            );
-        }
+        let params = mask_params(layer, clip);
+        encoder.set_fragment_bytes(
+            FilterInputIndex::Params as u64,
+            mem::size_of::<MaskParams>() as u64,
+            &params as *const MaskParams as *const _,
+        );
         encoder.set_scissor_rect(within);
         encoder.draw_primitives(metal::MTLPrimitiveType::TriangleStrip, 0, 4);
         encoder.end_encoding();
@@ -1807,12 +1804,29 @@ pub struct BlurParams {
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct MaskParams {
-    pub bounds: Bounds<ScaledPixels>,
+    pub source_bounds: Bounds<ScaledPixels>,
+    pub fade_bounds: Bounds<ScaledPixels>,
+    pub transform_origin: [f32; 2],
+    pub scale: f32,
     pub fade_top: f32,
     pub fade_bottom: f32,
     pub fade_left: f32,
     pub fade_right: f32,
+    pub pad: f32,
 }
+
+const _: () = {
+    assert!(mem::size_of::<MaskParams>() == 16 * mem::size_of::<f32>());
+    assert!(mem::offset_of!(MaskParams, source_bounds) == 0);
+    assert!(mem::offset_of!(MaskParams, fade_bounds) == 16);
+    assert!(mem::offset_of!(MaskParams, transform_origin) == 32);
+    assert!(mem::offset_of!(MaskParams, scale) == 40);
+    assert!(mem::offset_of!(MaskParams, fade_top) == 44);
+    assert!(mem::offset_of!(MaskParams, fade_bottom) == 48);
+    assert!(mem::offset_of!(MaskParams, fade_left) == 52);
+    assert!(mem::offset_of!(MaskParams, fade_right) == 56);
+    assert!(mem::offset_of!(MaskParams, pad) == 60);
+};
 
 #[repr(C)]
 pub enum FilterInputIndex {
@@ -1823,13 +1837,27 @@ pub enum FilterInputIndex {
     Source = 4,
 }
 
-fn mask_params(layer: LayerEffect) -> MaskParams {
+fn mask_params(layer: LayerEffect, destination_clip: Bounds<ScaledPixels>) -> MaskParams {
     MaskParams {
-        bounds: layer.clip,
+        source_bounds: if layer.filter.scales() {
+            layer.source_bounds
+        } else {
+            destination_clip
+        },
+        // Preserve the existing Metal fade clip for unscaled layers. A scaled layer must apply
+        // the fade in source coordinates before the final transform.
+        fade_bounds: if layer.filter.scales() {
+            layer.source_bounds
+        } else {
+            destination_clip
+        },
+        transform_origin: [layer.transform_origin.x.0, layer.transform_origin.y.0],
+        scale: layer.filter.scale,
         fade_top: layer.filter.fade_top,
         fade_bottom: layer.filter.fade_bottom,
         fade_left: layer.filter.fade_left,
         fade_right: layer.filter.fade_right,
+        pad: 0.0,
     }
 }
 

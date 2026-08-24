@@ -97,22 +97,30 @@ impl Scene {
     /// they would anywhere else, so a quad still covers an image painted before it.
     pub fn push_filter(
         &mut self,
-        bounds: Bounds<ScaledPixels>,
-        clip: Bounds<ScaledPixels>,
+        source_bounds: Bounds<ScaledPixels>,
+        transform_origin: Point<ScaledPixels>,
+        content_mask: Bounds<ScaledPixels>,
         filter: Filter,
     ) {
         let start = self.primitive_bounds.barrier();
+        let destination_bounds = scale_bounds_around(source_bounds, transform_origin, filter.scale);
         self.effects.push(LayerEffect {
             start,
             end: DrawOrder::MAX,
-            bounds,
-            clip,
+            source_bounds,
+            transform_origin,
+            destination_bounds,
+            content_mask,
             filter,
             parent: self.effect_stack.last().copied(),
         });
         self.effect_stack.push(self.effects.len() - 1);
-        self.paint_operations
-            .push(PaintOperation::StartFilter(bounds, clip, filter));
+        self.paint_operations.push(PaintOperation::StartFilter(
+            source_bounds,
+            transform_origin,
+            content_mask,
+            filter,
+        ));
     }
 
     pub fn pop_filter(&mut self) {
@@ -230,8 +238,8 @@ impl Scene {
                 PaintOperation::Primitive(primitive) => self.insert_primitive(primitive.clone()),
                 PaintOperation::StartLayer(bounds) => self.push_layer(*bounds),
                 PaintOperation::EndLayer => self.pop_layer(),
-                PaintOperation::StartFilter(bounds, clip, filter) => {
-                    self.push_filter(*bounds, *clip, *filter)
+                PaintOperation::StartFilter(bounds, transform_origin, content_mask, filter) => {
+                    self.push_filter(*bounds, *transform_origin, *content_mask, *filter)
                 }
                 PaintOperation::EndFilter => self.pop_filter(),
             }
@@ -326,28 +334,86 @@ pub(crate) enum PaintOperation {
     Primitive(Primitive),
     StartLayer(Bounds<ScaledPixels>),
     EndLayer,
-    StartFilter(Bounds<ScaledPixels>, Bounds<ScaledPixels>, Filter),
+    StartFilter(
+        Bounds<ScaledPixels>,
+        Point<ScaledPixels>,
+        Bounds<ScaledPixels>,
+        Filter,
+    ),
     EndFilter,
 }
 
 /// A run of primitives that is drawn offscreen, put through [`Effect`], and composited back.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 #[expect(missing_docs)]
 pub struct LayerEffect {
     /// The order the layer opened at. Everything it contains is drawn between this and `end`.
     pub start: DrawOrder,
     /// The order the layer closed at.
     pub end: DrawOrder,
-    pub bounds: Bounds<ScaledPixels>,
-    /// Where the composited layer is allowed to land, after the content mask in force at the time.
-    pub clip: Bounds<ScaledPixels>,
+    /// The area of the untransformed offscreen source, including blur reach.
+    pub source_bounds: Bounds<ScaledPixels>,
+    /// The center of the element's original bounds, before adding blur reach.
+    pub transform_origin: Point<ScaledPixels>,
+    /// The source bounds after applying the layer scale around `transform_origin`.
+    pub destination_bounds: Bounds<ScaledPixels>,
+    /// The parent content mask that was in force when the layer opened.
+    pub content_mask: Bounds<ScaledPixels>,
     pub filter: Filter,
     /// The enclosing layer, if this one is nested.
     pub parent: Option<usize>,
 }
 
+impl LayerEffect {
+    /// The transformed destination area after clipping to the parent content mask.
+    pub fn destination_clip(&self) -> Bounds<ScaledPixels> {
+        self.destination_bounds.intersect(&self.content_mask)
+    }
+
+    /// The destination span rounded out to whole pixels when a transform made it fractional.
+    pub fn destination_scissor_bounds(
+        &self,
+        destination_span: Bounds<ScaledPixels>,
+    ) -> Bounds<ScaledPixels> {
+        if !self.filter.scales() {
+            return destination_span;
+        }
+
+        Bounds::from_corners(
+            point(
+                ScaledPixels(destination_span.origin.x.0.floor()),
+                ScaledPixels(destination_span.origin.y.0.floor()),
+            ),
+            point(
+                ScaledPixels(destination_span.bottom_right().x.0.ceil()),
+                ScaledPixels(destination_span.bottom_right().y.0.ceil()),
+            ),
+        )
+    }
+
+    /// The source area the blur passes need to update.
+    ///
+    /// Unscaled layers retain the previous clipped processing area. A transformed layer must keep
+    /// its whole source because the destination clip is in a different coordinate space.
+    pub fn blur_bounds(&self, destination_span: Bounds<ScaledPixels>) -> Bounds<ScaledPixels> {
+        if self.filter.scales() {
+            self.source_bounds
+        } else {
+            destination_span
+        }
+    }
+
+    /// Whether adjacent sibling layers may share one composite operation.
+    pub fn can_merge_with(&self, next: &Self) -> bool {
+        self.filter == next.filter
+            && self.parent == next.parent
+            && !next.filter.fades()
+            && !self.filter.scales()
+    }
+}
+
 /// What a layer does to its contents on the way back into the frame.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Filter {
     /// The standard deviation of the blur, in scaled pixels.
     pub blur: f32,
@@ -359,12 +425,27 @@ pub struct Filter {
     pub fade_left: f32,
     /// How far the contents fade out at the right edge, in scaled pixels.
     pub fade_right: f32,
+    /// Uniform compositor scale around the layer's transform origin.
+    pub scale: f32,
+}
+
+impl Default for Filter {
+    fn default() -> Self {
+        Self {
+            blur: 0.0,
+            fade_top: 0.0,
+            fade_bottom: 0.0,
+            fade_left: 0.0,
+            fade_right: 0.0,
+            scale: 1.0,
+        }
+    }
 }
 
 impl Filter {
     /// Whether the layer changes its contents at all.
     pub fn is_noop(&self) -> bool {
-        self.blur <= 0. && !self.fades()
+        self.blur <= 0. && !self.fades() && !self.scales()
     }
 
     /// Whether the layer has to go through the blur passes.
@@ -375,6 +456,184 @@ impl Filter {
     /// Whether the layer is masked on its way back.
     pub fn fades(&self) -> bool {
         self.fade_top > 0. || self.fade_bottom > 0. || self.fade_left > 0. || self.fade_right > 0.
+    }
+
+    /// Whether the layer is transformed while it is composited.
+    pub fn scales(&self) -> bool {
+        self.scale != 1.0
+    }
+}
+
+pub(crate) fn scale_bounds_around(
+    bounds: Bounds<ScaledPixels>,
+    origin: Point<ScaledPixels>,
+    scale: f32,
+) -> Bounds<ScaledPixels> {
+    let scaled_x = |value: ScaledPixels| ScaledPixels(origin.x.0 + (value.0 - origin.x.0) * scale);
+    let scaled_y = |value: ScaledPixels| ScaledPixels(origin.y.0 + (value.0 - origin.y.0) * scale);
+
+    Bounds::from_corners(
+        point(scaled_x(bounds.origin.x), scaled_y(bounds.origin.y)),
+        point(
+            scaled_x(bounds.bottom_right().x),
+            scaled_y(bounds.bottom_right().y),
+        ),
+    )
+}
+
+#[cfg(test)]
+mod layer_filter_tests {
+    use super::*;
+    use crate::{bounds, size};
+
+    fn rect(x: f32, y: f32, width: f32, height: f32) -> Bounds<ScaledPixels> {
+        bounds(
+            point(ScaledPixels(x), ScaledPixels(y)),
+            size(ScaledPixels(width), ScaledPixels(height)),
+        )
+    }
+
+    fn origin(x: f32, y: f32) -> Point<ScaledPixels> {
+        point(ScaledPixels(x), ScaledPixels(y))
+    }
+
+    fn filter(scale: f32) -> Filter {
+        Filter {
+            scale,
+            ..Default::default()
+        }
+    }
+
+    fn assert_close(actual: f32, expected: f32) {
+        assert!(
+            (actual - expected).abs() < 0.0001,
+            "expected {expected}, got {actual}"
+        );
+    }
+
+    fn assert_bounds_close(actual: Bounds<ScaledPixels>, expected: Bounds<ScaledPixels>) {
+        assert_close(actual.origin.x.0, expected.origin.x.0);
+        assert_close(actual.origin.y.0, expected.origin.y.0);
+        assert_close(actual.size.width.0, expected.size.width.0);
+        assert_close(actual.size.height.0, expected.size.height.0);
+    }
+
+    #[test]
+    fn filter_scale_participates_in_noop_detection() {
+        assert!(Filter::default().is_noop());
+        assert!(filter(1.0).is_noop());
+        assert!(!filter(0.99).is_noop());
+    }
+
+    #[test]
+    fn center_based_scaling_keeps_the_origin_fixed() {
+        let source = rect(10.0, 20.0, 100.0, 40.0);
+        let transform_origin = origin(60.0, 40.0);
+        let destination = scale_bounds_around(source, transform_origin, 0.99);
+
+        assert_bounds_close(destination, rect(10.5, 20.2, 99.0, 39.6));
+        assert_bounds_close(
+            Bounds::centered_at(destination.center(), destination.size),
+            destination,
+        );
+        assert_eq!(destination.center(), transform_origin);
+    }
+
+    #[test]
+    fn fractional_scale_preserves_subpixel_destination_bounds() {
+        let destination =
+            scale_bounds_around(rect(4.25, 8.5, 137.0, 53.0), origin(72.75, 35.0), 0.9973);
+
+        assert_close(destination.origin.x.0, 4.43495);
+        assert_close(destination.origin.y.0, 8.57155);
+        assert_close(destination.size.width.0, 136.6301);
+        assert_close(destination.size.height.0, 52.8569);
+    }
+
+    #[test]
+    fn layer_effect_separates_source_destination_and_parent_clip() {
+        let source = rect(10.0, 20.0, 100.0, 40.0);
+        let content_mask = rect(20.0, 10.0, 80.0, 80.0);
+        let mut scene = Scene::default();
+        scene.push_filter(source, origin(60.0, 40.0), content_mask, filter(1.1));
+        scene.pop_filter();
+
+        let effect = scene.effects[0];
+        assert_eq!(effect.source_bounds, source);
+        assert_eq!(effect.transform_origin, origin(60.0, 40.0));
+        assert_bounds_close(effect.destination_bounds, rect(5.0, 18.0, 110.0, 44.0));
+        assert_bounds_close(effect.destination_clip(), rect(20.0, 18.0, 80.0, 44.0));
+        assert_eq!(effect.blur_bounds(effect.destination_clip()), source);
+
+        let fractional_span = rect(20.25, 18.75, 79.5, 43.5);
+        assert_eq!(
+            effect.destination_scissor_bounds(fractional_span),
+            rect(20.0, 18.0, 80.0, 45.0)
+        );
+    }
+
+    #[test]
+    fn nested_effects_keep_their_parent_and_geometry() {
+        let mut scene = Scene::default();
+        scene.push_filter(
+            rect(0.0, 0.0, 200.0, 100.0),
+            origin(100.0, 50.0),
+            rect(0.0, 0.0, 300.0, 200.0),
+            filter(0.99),
+        );
+        scene.push_filter(
+            rect(20.0, 10.0, 50.0, 30.0),
+            origin(45.0, 25.0),
+            rect(0.0, 0.0, 200.0, 100.0),
+            filter(0.9973),
+        );
+        scene.pop_filter();
+        scene.pop_filter();
+
+        assert_eq!(scene.effects[0].parent, None);
+        assert_eq!(scene.effects[1].parent, Some(0));
+        assert_eq!(scene.filter_chain(1), vec![0, 1]);
+        assert_eq!(scene.effects[1].transform_origin, origin(45.0, 25.0));
+    }
+
+    #[test]
+    fn scene_replay_restores_scaled_layer_effects() {
+        let mut previous = Scene::default();
+        previous.push_filter(
+            rect(10.0, 20.0, 100.0, 40.0),
+            origin(60.0, 40.0),
+            rect(0.0, 0.0, 120.0, 80.0),
+            Filter {
+                blur: 3.0,
+                fade_top: 2.0,
+                scale: 0.9973,
+                ..Default::default()
+            },
+        );
+        previous.pop_filter();
+
+        let mut replayed = Scene::default();
+        replayed.replay(0..previous.len(), &previous);
+
+        assert_eq!(replayed.effects, previous.effects);
+    }
+
+    #[test]
+    fn transformed_sibling_layers_cannot_merge() {
+        let bounds = rect(0.0, 0.0, 100.0, 50.0);
+        let content_mask = rect(0.0, 0.0, 500.0, 500.0);
+        let mut scene = Scene::default();
+        scene.push_filter(bounds, origin(50.0, 25.0), content_mask, filter(0.99));
+        scene.pop_filter();
+        scene.push_filter(bounds, origin(150.0, 25.0), content_mask, filter(0.99));
+        scene.pop_filter();
+
+        assert!(!scene.effects[0].can_merge_with(&scene.effects[1]));
+
+        let mut unscaled = scene.effects;
+        unscaled[0].filter.scale = 1.0;
+        unscaled[1].filter.scale = 1.0;
+        assert!(unscaled[0].can_merge_with(&unscaled[1]));
     }
 }
 

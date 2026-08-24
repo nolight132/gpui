@@ -209,14 +209,18 @@ struct BackdropViews {
     steps: Vec<[wgpu::TextureView; 2]>,
 }
 
-#[repr(C)]
+#[repr(C, align(8))]
 #[derive(Clone, Copy, Default)]
 struct MaskParams {
-    bounds: [f32; 4],
+    source_bounds: [f32; 4],
+    fade_bounds: [f32; 4],
+    transform_origin: [f32; 2],
+    scale: f32,
     fade_top: f32,
     fade_bottom: f32,
     fade_left: f32,
     fade_right: f32,
+    pad: f32,
 }
 
 #[repr(C)]
@@ -1013,7 +1017,7 @@ impl WgpuRenderer {
             &layouts.instances,
             Some(&layouts.texture),
             wgpu::PrimitiveTopology::TriangleStrip,
-            &[Some(opaque_target.clone())],
+            &[Some(opaque_target)],
             1,
             &shader_module,
         );
@@ -1021,7 +1025,7 @@ impl WgpuRenderer {
         let composite = create_pipeline(
             "composite",
             "vs_blur",
-            "fs_blit",
+            "fs_mask",
             &layouts.globals,
             &layouts.instances,
             Some(&layouts.texture),
@@ -1039,7 +1043,7 @@ impl WgpuRenderer {
             &layouts.instances,
             Some(&layouts.texture),
             wgpu::PrimitiveTopology::TriangleStrip,
-            &[Some(premultiplied_target.clone())],
+            &[Some(premultiplied_target)],
             1,
             &shader_module,
         );
@@ -1921,6 +1925,7 @@ impl WgpuRenderer {
             // per row.
             let mut spans: Vec<Bounds<ScaledPixels>> = Vec::new();
             let mut cleared = [false; LAYER_DEPTH];
+            let mut transformed_target = [false; LAYER_DEPTH];
             for batch in scene.batches() {
                 let wanted = views
                     .as_ref()
@@ -1943,12 +1948,9 @@ impl WgpuRenderer {
                     {
                         let next = scene.effects[wanted[shared]];
                         let held = scene.effects[*open];
-                        if next.filter == held.filter
-                            && next.parent == held.parent
-                            && !next.filter.fades()
-                        {
+                        if held.can_merge_with(&next) {
                             *open = wanted[shared];
-                            *span = span.union(&next.clip);
+                            *span = span.union(&next.destination_clip());
                             merged = true;
                             break;
                         }
@@ -1956,7 +1958,7 @@ impl WgpuRenderer {
 
                     let index = stack.pop().expect("the stack is not empty");
                     let layer = scene.effects[index];
-                    let clip = spans.pop().unwrap_or(layer.clip);
+                    let clip = spans.pop().unwrap_or_else(|| layer.destination_clip());
                     let held = views
                         .as_ref()
                         .expect("a filtered layer implies its targets");
@@ -1973,7 +1975,7 @@ impl WgpuRenderer {
                             held,
                             source,
                             layer.filter.blur,
-                            Some(clip),
+                            Some(layer.blur_bounds(clip)),
                             &mut instance_offset,
                         )?,
                         false => source.clone(),
@@ -1981,7 +1983,7 @@ impl WgpuRenderer {
                     let params = self.write_instance_binding(
                         "layer_composite_bind_group",
                         &mut instance_offset,
-                        &[mask_params(layer)],
+                        &[mask_params(layer, clip)],
                     )?;
                     pass = Self::resume_pass(
                         &mut encoder,
@@ -1989,7 +1991,13 @@ impl WgpuRenderer {
                         onto,
                         wgpu::LoadOp::Load,
                     );
-                    self.composite_layer(&blurred, clip, layer.filter.fades(), &params, &mut pass);
+                    self.composite_layer(
+                        &blurred,
+                        layer.destination_scissor_bounds(clip),
+                        layer.filter.fades(),
+                        &params,
+                        &mut pass,
+                    );
                 }
 
                 for index in wanted.iter().skip(shared + usize::from(merged)) {
@@ -2001,19 +2009,19 @@ impl WgpuRenderer {
                         .as_ref()
                         .expect("a filtered layer implies its targets");
                     let depth = stack.len();
-                    // The target is wiped the first time a frame reaches this depth. Layers that
-                    // share it afterwards sit side by side, so clearing again would eat what the
-                    // one before drew.
-                    let load = match cleared[depth] {
-                        true => wgpu::LoadOp::Load,
-                        false => wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    let should_clear =
+                        !cleared[depth] || layer.filter.scales() || transformed_target[depth];
+                    let load = match should_clear {
+                        true => wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        false => wgpu::LoadOp::Load,
                     };
                     cleared[depth] = true;
+                    transformed_target[depth] = layer.filter.scales();
 
                     drop(pass);
                     pass = Self::resume_pass(&mut encoder, "layer_pass", &held.layers[depth], load);
                     stack.push(*index);
-                    spans.push(layer.clip);
+                    spans.push(layer.destination_clip());
                 }
 
                 match batch {
@@ -2139,7 +2147,7 @@ impl WgpuRenderer {
 
             while let Some(index) = stack.pop() {
                 let layer = scene.effects[index];
-                let clip = spans.pop().unwrap_or(layer.clip);
+                let clip = spans.pop().unwrap_or_else(|| layer.destination_clip());
                 let held = views
                     .as_ref()
                     .expect("a filtered layer implies its targets");
@@ -2156,7 +2164,7 @@ impl WgpuRenderer {
                         held,
                         source,
                         layer.filter.blur,
-                        Some(clip),
+                        Some(layer.blur_bounds(clip)),
                         &mut instance_offset,
                     )?,
                     false => source.clone(),
@@ -2164,7 +2172,7 @@ impl WgpuRenderer {
                 let params = self.write_instance_binding(
                     "layer_composite_bind_group",
                     &mut instance_offset,
-                    &[mask_params(layer)],
+                    &[mask_params(layer, clip)],
                 )?;
                 pass = Self::resume_pass(
                     &mut encoder,
@@ -2172,7 +2180,13 @@ impl WgpuRenderer {
                     onto,
                     wgpu::LoadOp::Load,
                 );
-                self.composite_layer(&blurred, clip, layer.filter.fades(), &params, &mut pass);
+                self.composite_layer(
+                    &blurred,
+                    layer.destination_scissor_bounds(clip),
+                    layer.filter.fades(),
+                    &params,
+                    &mut pass,
+                );
             }
         }
 
@@ -2800,18 +2814,33 @@ impl WgpuRenderer {
     }
 }
 
-fn mask_params(layer: LayerEffect) -> MaskParams {
+fn mask_params(layer: LayerEffect, destination_span: Bounds<ScaledPixels>) -> MaskParams {
+    let source_bounds = if layer.filter.scales() {
+        layer.source_bounds
+    } else {
+        destination_span
+    };
     MaskParams {
-        bounds: [
-            layer.bounds.origin.x.0,
-            layer.bounds.origin.y.0,
-            layer.bounds.size.width.0,
-            layer.bounds.size.height.0,
+        source_bounds: [
+            source_bounds.origin.x.0,
+            source_bounds.origin.y.0,
+            source_bounds.size.width.0,
+            source_bounds.size.height.0,
         ],
+        // WGPU has historically based fade_edges on the blur-expanded layer bounds.
+        fade_bounds: [
+            layer.source_bounds.origin.x.0,
+            layer.source_bounds.origin.y.0,
+            layer.source_bounds.size.width.0,
+            layer.source_bounds.size.height.0,
+        ],
+        transform_origin: [layer.transform_origin.x.0, layer.transform_origin.y.0],
+        scale: layer.filter.scale,
         fade_top: layer.filter.fade_top,
         fade_bottom: layer.filter.fade_bottom,
         fade_left: layer.filter.fade_left,
         fade_right: layer.filter.fade_right,
+        pad: 0.0,
     }
 }
 
@@ -2921,5 +2950,16 @@ mod tests {
         assert_eq!(std::mem::size_of::<MonochromeSprite>(), 28 * 4);
         assert_eq!(std::mem::size_of::<SubpixelSprite>(), 28 * 4);
         assert_eq!(std::mem::size_of::<PolychromeSprite>(), 24 * 4);
+        assert_eq!(std::mem::size_of::<MaskParams>(), 16 * 4);
+        assert_eq!(std::mem::align_of::<MaskParams>(), 8);
+        assert_eq!(std::mem::offset_of!(MaskParams, source_bounds), 0);
+        assert_eq!(std::mem::offset_of!(MaskParams, fade_bounds), 16);
+        assert_eq!(std::mem::offset_of!(MaskParams, transform_origin), 32);
+        assert_eq!(std::mem::offset_of!(MaskParams, scale), 40);
+        assert_eq!(std::mem::offset_of!(MaskParams, fade_top), 44);
+        assert_eq!(std::mem::offset_of!(MaskParams, fade_bottom), 48);
+        assert_eq!(std::mem::offset_of!(MaskParams, fade_left), 52);
+        assert_eq!(std::mem::offset_of!(MaskParams, fade_right), 56);
+        assert_eq!(std::mem::offset_of!(MaskParams, pad), 60);
     }
 }

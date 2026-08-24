@@ -451,6 +451,9 @@ pub struct LayerFilter {
     pub fade_left: Option<Pixels>,
     /// Fade the layer out over this distance from its right edge.
     pub fade_right: Option<Pixels>,
+    /// Uniformly scale the composited layer without affecting layout. Values must be finite and
+    /// greater than zero.
+    pub scale: Option<f32>,
 }
 
 impl LayerFilter {
@@ -461,6 +464,7 @@ impl LayerFilter {
             && self.fade_bottom.is_none()
             && self.fade_left.is_none()
             && self.fade_right.is_none()
+            && self.scale.is_none_or(|scale| scale == 1.0)
     }
 }
 
@@ -1389,6 +1393,30 @@ mod tests {
     use super::*;
 
     use util_macros::perf;
+
+    #[test]
+    fn layer_filter_scale_participates_in_none_detection() {
+        let mut filter = LayerFilter::default();
+        assert!(filter.is_none());
+
+        filter.scale = Some(1.0);
+        assert!(filter.is_none());
+
+        filter.scale = Some(0.99);
+        assert!(!filter.is_none());
+    }
+
+    #[test]
+    fn layer_scale_builder_sets_a_paint_filter() {
+        let refinement = StyleRefinement::default().layer_scale(0.9973);
+        assert_eq!(refinement.filter.unwrap().scale, Some(0.9973));
+    }
+
+    #[test]
+    #[should_panic(expected = "layer scale must be finite and greater than zero")]
+    fn layer_scale_builder_rejects_invalid_values() {
+        let _ = StyleRefinement::default().layer_scale(f32::NAN);
+    }
 
     #[perf]
     fn test_basic_highlight_style_combination() {
