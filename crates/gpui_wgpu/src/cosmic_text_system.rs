@@ -1121,7 +1121,6 @@ fn read_msdf_outline(
         return Ok(None);
     }
     shape.normalize();
-    shape.orient_contours();
     edge_coloring_simple(&mut shape, 3.0, 0);
     if !shape.validate() {
         return Ok(None);
