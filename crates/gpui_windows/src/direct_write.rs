@@ -2,10 +2,15 @@ use std::{
     borrow::Cow,
     ffi::{c_uint, c_void},
     mem::ManuallyDrop,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use anyhow::{Context, Result};
 use collections::HashMap;
+use gpui_mtsdf::{GlyphOutline as MsdfOutline, OutlineBounds, OutlineBuilder};
 use gpui_util::ResultExt;
 use parking_lot::{RwLock, RwLockUpgradableReadGuard};
 use windows::{
@@ -13,8 +18,8 @@ use windows::{
         Foundation::*,
         Globalization::GetUserDefaultLocaleName,
         Graphics::{
-            Direct3D::D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP, Direct3D11::*, DirectWrite::*,
-            Dxgi::Common::*, Gdi::LOGFONTW,
+            Direct2D::Common::*, Direct3D::D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP, Direct3D11::*,
+            DirectWrite::*, Dxgi::Common::*, Gdi::LOGFONTW,
         },
         System::SystemServices::LOCALE_NAME_MAX_LENGTH,
         UI::WindowsAndMessaging::*,
@@ -280,6 +285,30 @@ impl PlatformTextSystem for DirectWriteTextSystem {
         self.state
             .read()
             .rasterize_glyph(&self.components, params, raster_bounds)
+    }
+
+    fn supports_msdf(&self) -> bool {
+        true
+    }
+
+    fn msdf_glyph_info(&self, params: &MsdfGlyphParams) -> Result<Option<MsdfGlyphInfo>> {
+        let lock = self.state.read();
+        let Some(outline) = lock.msdf_outline(params)? else {
+            return Ok(None);
+        };
+        Ok(Some(outline.glyph_info(params)?))
+    }
+
+    fn rasterize_msdf_glyph(
+        &self,
+        params: &MsdfGlyphParams,
+        info: MsdfGlyphInfo,
+    ) -> Result<Option<Vec<u8>>> {
+        let lock = self.state.read();
+        let Some(outline) = lock.msdf_outline(params)? else {
+            return Ok(None);
+        };
+        outline.rasterize(params, info)
     }
 
     fn layout_line(&self, text: &str, font_size: Pixels, runs: &[FontRun]) -> LineLayout {
@@ -600,12 +629,12 @@ impl DirectWriteState {
             };
 
             let (ascent, descent) = {
-                let mut first_metrics = [DWRITE_LINE_METRICS::default(); 4];
+                let mut first_metrics = [DWRITE_LINE_METRICS1::default(); 4];
                 let mut line_count = 0u32;
                 text_layout.GetLineMetrics(Some(&mut first_metrics), &mut line_count)?;
                 (
-                    px(first_metrics[0].baseline),
-                    px(first_metrics[0].height - first_metrics[0].baseline),
+                    px(first_metrics[0].Base.baseline),
+                    px(first_metrics[0].Base.height - first_metrics[0].Base.baseline),
                 )
             };
             let mut break_ligatures = true;
@@ -1264,6 +1293,64 @@ impl DirectWriteState {
         }
     }
 
+    fn msdf_outline(&self, params: &MsdfGlyphParams) -> Result<Option<MsdfOutline>> {
+        let Some(font_info) = self.fonts.get(params.font_id.0) else {
+            anyhow::bail!("MSDF font id is not loaded");
+        };
+        if unsafe { font_info.font_face.IsColorFont().as_bool() } {
+            return Ok(None);
+        }
+
+        let mut font_metrics = DWRITE_FONT_METRICS1::default();
+        unsafe { font_info.font_face.GetMetrics(&mut font_metrics) };
+        let units_per_em = font_metrics.Base.designUnitsPerEm as f64;
+        if units_per_em <= 0.0 {
+            return Ok(None);
+        }
+
+        let glyph = params.glyph_id.0 as u16;
+        let bounds = self.get_typographic_bounds(params.font_id, params.glyph_id)?;
+        if bounds.size.width <= 0.0 || bounds.size.height <= 0.0 {
+            return Ok(None);
+        }
+
+        let builder = Arc::new(parking_lot::Mutex::new(OutlineBuilder::default()));
+        let supported = Arc::new(AtomicBool::new(true));
+        let sink: ID2D1SimplifiedGeometrySink = MsdfGeometrySink {
+            builder: builder.clone(),
+            supported: supported.clone(),
+        }
+        .into();
+        unsafe {
+            font_info.font_face.GetGlyphRunOutline(
+                units_per_em as f32,
+                &glyph,
+                None,
+                None,
+                1,
+                false,
+                false,
+                &sink,
+            )?;
+            sink.Close()?;
+        }
+        if !supported.load(Ordering::Relaxed) {
+            return Ok(None);
+        }
+        let builder = std::mem::take(&mut *builder.lock());
+        // DirectWrite outline coordinates are y-down. Convert both path and metrics to the
+        // native-font y-up convention consumed by the shared generator.
+        Ok(builder.finish(
+            OutlineBounds {
+                min_x: bounds.origin.x as f64,
+                min_y: -(bounds.origin.y + bounds.size.height) as f64,
+                max_x: (bounds.origin.x + bounds.size.width) as f64,
+                max_y: -bounds.origin.y as f64,
+            },
+            units_per_em,
+        ))
+    }
+
     fn get_advance(&self, font_id: FontId, glyph_id: GlyphId) -> Result<Size<f32>> {
         unsafe {
             let font = &self.fonts[font_id.0].font_face;
@@ -1377,6 +1464,76 @@ struct GlyphLayerTextureParams {
     gamma_ratios: [f32; 4],
     grayscale_enhanced_contrast: f32,
     _pad: [f32; 3],
+}
+
+#[implement(ID2D1SimplifiedGeometrySink)]
+struct MsdfGeometrySink {
+    builder: Arc<parking_lot::Mutex<OutlineBuilder>>,
+    supported: Arc<AtomicBool>,
+}
+
+impl ID2D1SimplifiedGeometrySink_Impl for MsdfGeometrySink_Impl {
+    fn SetFillMode(&self, fillmode: D2D1_FILL_MODE) {
+        if fillmode != D2D1_FILL_MODE_WINDING {
+            self.supported.store(false, Ordering::Relaxed);
+        }
+    }
+
+    fn SetSegmentFlags(&self, _vertexflags: D2D1_PATH_SEGMENT) {}
+
+    fn BeginFigure(&self, startpoint: &Vector2, _figurebegin: D2D1_FIGURE_BEGIN) {
+        self.builder
+            .lock()
+            .move_to(startpoint.X as f64, -startpoint.Y as f64);
+    }
+
+    fn AddLines(&self, points: *const Vector2, pointscount: u32) {
+        if points.is_null() {
+            self.supported.store(false, Ordering::Relaxed);
+            return;
+        }
+        let points = unsafe { std::slice::from_raw_parts(points, pointscount as usize) };
+        let mut builder = self.builder.lock();
+        for point in points {
+            builder.line_to(point.X as f64, -point.Y as f64);
+        }
+    }
+
+    fn AddBeziers(&self, beziers: *const D2D1_BEZIER_SEGMENT, bezierscount: u32) {
+        if beziers.is_null() {
+            self.supported.store(false, Ordering::Relaxed);
+            return;
+        }
+        let beziers = unsafe { std::slice::from_raw_parts(beziers, bezierscount as usize) };
+        let mut builder = self.builder.lock();
+        for bezier in beziers {
+            builder.cubic_to(
+                bezier.point1.X as f64,
+                -bezier.point1.Y as f64,
+                bezier.point2.X as f64,
+                -bezier.point2.Y as f64,
+                bezier.point3.X as f64,
+                -bezier.point3.Y as f64,
+            );
+        }
+    }
+
+    fn EndFigure(&self, figureend: D2D1_FIGURE_END) {
+        if figureend == D2D1_FIGURE_END_CLOSED {
+            self.builder.lock().close();
+        } else {
+            // Font fill outlines must be closed; do not silently alter unsupported geometry.
+            self.supported.store(false, Ordering::Relaxed);
+        }
+    }
+
+    fn Close(&self) -> windows::core::Result<()> {
+        if self.supported.load(Ordering::Relaxed) {
+            Ok(())
+        } else {
+            Err(windows::core::Error::from(E_NOTIMPL))
+        }
+    }
 }
 
 struct TextRendererWrapper(IDWriteTextRenderer);

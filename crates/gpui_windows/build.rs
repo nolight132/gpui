@@ -40,6 +40,7 @@ mod shader_compilation {
             "path_sprite",
             "underline",
             "monochrome_sprite",
+            "msdf_sprite",
             "subpixel_sprite",
             "polychrome_sprite",
         ];

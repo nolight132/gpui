@@ -22,6 +22,7 @@ struct DirectXAtlasState {
     monochrome_textures: AtlasTextureList<DirectXAtlasTexture>,
     polychrome_textures: AtlasTextureList<DirectXAtlasTexture>,
     subpixel_textures: AtlasTextureList<DirectXAtlasTexture>,
+    msdf_textures: AtlasTextureList<DirectXAtlasTexture>,
     tiles_by_key: FxHashMap<AtlasKey, AtlasTile>,
 }
 
@@ -42,6 +43,7 @@ impl DirectXAtlas {
             monochrome_textures: Default::default(),
             polychrome_textures: Default::default(),
             subpixel_textures: Default::default(),
+            msdf_textures: Default::default(),
             tiles_by_key: Default::default(),
         }))
     }
@@ -66,6 +68,7 @@ impl DirectXAtlas {
         lock.monochrome_textures = AtlasTextureList::default();
         lock.polychrome_textures = AtlasTextureList::default();
         lock.subpixel_textures = AtlasTextureList::default();
+        lock.msdf_textures = AtlasTextureList::default();
         lock.tiles_by_key.clear();
     }
 }
@@ -107,7 +110,7 @@ impl PlatformAtlas for DirectXAtlas {
             AtlasTextureKind::Monochrome => &mut lock.monochrome_textures,
             AtlasTextureKind::Polychrome => &mut lock.polychrome_textures,
             AtlasTextureKind::Subpixel => &mut lock.subpixel_textures,
-            AtlasTextureKind::Msdf => &mut lock.polychrome_textures,
+            AtlasTextureKind::Msdf => &mut lock.msdf_textures,
         };
 
         let Some(texture_slot) = textures.textures.get_mut(id.index as usize) else {
@@ -137,7 +140,7 @@ impl DirectXAtlasState {
                 AtlasTextureKind::Monochrome => &mut self.monochrome_textures,
                 AtlasTextureKind::Polychrome => &mut self.polychrome_textures,
                 AtlasTextureKind::Subpixel => &mut self.subpixel_textures,
-                AtlasTextureKind::Msdf => &mut self.polychrome_textures,
+                AtlasTextureKind::Msdf => &mut self.msdf_textures,
             };
 
             if let Some(tile) = textures
@@ -223,7 +226,7 @@ impl DirectXAtlasState {
             AtlasTextureKind::Monochrome => &mut self.monochrome_textures,
             AtlasTextureKind::Polychrome => &mut self.polychrome_textures,
             AtlasTextureKind::Subpixel => &mut self.subpixel_textures,
-            AtlasTextureKind::Msdf => &mut self.polychrome_textures,
+            AtlasTextureKind::Msdf => &mut self.msdf_textures,
         };
         let index = texture_list.free_list.pop();
         let view = unsafe {
@@ -264,9 +267,7 @@ impl DirectXAtlasState {
             AtlasTextureKind::Subpixel => {
                 &self.subpixel_textures[id.index as usize].as_ref().unwrap()
             }
-            AtlasTextureKind::Msdf => &self.polychrome_textures[id.index as usize]
-                .as_ref()
-                .unwrap(),
+            AtlasTextureKind::Msdf => &self.msdf_textures[id.index as usize].as_ref().unwrap(),
         }
     }
 }

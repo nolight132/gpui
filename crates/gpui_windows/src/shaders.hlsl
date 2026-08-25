@@ -1187,6 +1187,73 @@ float4 monochrome_sprite_fragment(MonochromeSpriteFragmentInput input): SV_Targe
     return float4(input.color.rgb, input.color.a * alpha_corrected);
 }
 
+struct MsdfSprite {
+    uint order;
+    uint pad;
+    Bounds bounds;
+    Bounds content_mask;
+    Hsla color;
+    AtlasTile tile;
+    TransformationMatrix transformation;
+    float distance_scale;
+    float embolden;
+    uint2 abi_padding;
+};
+
+struct MsdfSpriteVertexOutput {
+    float4 position: SV_Position;
+    float2 tile_position: POSITION;
+    nointerpolation float4 color: COLOR;
+    nointerpolation float2 distance: TEXCOORD0;
+    float4 clip_distance: TEXCOORD1;
+    float2 field_position: TEXCOORD2;
+};
+
+StructuredBuffer<MsdfSprite> msdf_sprites: register(t1);
+
+MsdfSpriteVertexOutput msdf_sprite_vertex(uint vertex_id: SV_VertexID, uint instance_id: SV_InstanceID) {
+    float2 unit_vertex = float2(float(vertex_id & 1u), 0.5 * float(vertex_id & 2u));
+    uint sprite_id = batch_start_index + instance_id;
+    MsdfSprite sprite = msdf_sprites[sprite_id];
+    uint atlas_width;
+    uint atlas_height;
+    t_sprite.GetDimensions(atlas_width, atlas_height);
+    float2 tile_origin = sprite.tile.bounds.origin;
+    float2 tile_size = sprite.tile.bounds.size;
+
+    MsdfSpriteVertexOutput output;
+    output.position =
+        to_device_position_transformed(unit_vertex, sprite.bounds, sprite.transformation);
+    output.tile_position =
+        (tile_origin + 0.5 + unit_vertex * (tile_size - 1.0)) /
+        float2(float(atlas_width), float(atlas_height));
+    output.color = hsla_to_rgba(sprite.color);
+    output.distance = float2(sprite.distance_scale, sprite.embolden);
+    output.clip_distance = distance_from_clip_rect_transformed(
+        unit_vertex, sprite.bounds, sprite.content_mask, sprite.transformation);
+    output.field_position = unit_vertex * sprite.bounds.size / sprite.distance_scale;
+    return output;
+}
+
+float4 msdf_sprite_fragment(MsdfSpriteVertexOutput input): SV_Target {
+    float4 sample = t_sprite.Sample(s_sprite, input.tile_position);
+    float signed_distance =
+        max(min(sample.r, sample.g), min(max(sample.r, sample.g), sample.b)) - 0.5;
+    float screen_distance = signed_distance * input.distance.x + input.distance.y;
+    float inverse_screen_scale = 0.5 * input.distance.x *
+        (length(ddx(input.field_position)) + length(ddy(input.field_position)));
+    float antialias_width = clamp(inverse_screen_scale, 0.0001, 1.0);
+    float coverage = saturate(screen_distance / antialias_width + 0.5);
+    float alpha_corrected = apply_contrast_and_gamma_correction(
+        coverage, input.color.rgb, grayscale_enhanced_contrast, gamma_ratios);
+
+    // Derivatives above must execute uniformly; apply clipping afterwards.
+    if (any(input.clip_distance < 0.0)) {
+        return 0.0;
+    }
+    return float4(input.color.rgb, input.color.a * alpha_corrected);
+}
+
 MonochromeSpriteVertexOutput subpixel_sprite_vertex(uint vertex_id: SV_VertexID, uint instance_id: SV_InstanceID) {
     return monochrome_sprite_vertex(vertex_id, instance_id);
 }
