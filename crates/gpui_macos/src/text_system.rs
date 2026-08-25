@@ -5,8 +5,9 @@ use core_foundation::{
     array::{CFArray, CFArrayRef},
     attributed_string::CFMutableAttributedString,
     base::{CFRange, CFType, TCFType},
-    number::CFNumber,
-    string::CFString,
+    dictionary::{CFDictionary, CFDictionaryRef},
+    number::{CFNumber, CFNumberRef},
+    string::{CFString, CFStringRef},
 };
 use core_graphics::{
     base::{CGGlyph, kCGImageAlphaPremultipliedLast},
@@ -15,11 +16,11 @@ use core_graphics::{
     display::CGPoint,
 };
 use core_text::{
-    font::CTFont,
+    font::{CTFont, CTFontRef},
     font_collection::CTFontCollectionRef,
     font_descriptor::{
-        CTFontDescriptor, kCTFontSlantTrait, kCTFontSymbolicTrait, kCTFontWeightTrait,
-        kCTFontWidthTrait,
+        CTFontDescriptor, CTFontDescriptorRef, kCTFontSlantTrait, kCTFontSymbolicTrait,
+        kCTFontWeightTrait, kCTFontWidthTrait,
     },
     line::CTLine,
     string_attributes::kCTFontAttributeName,
@@ -61,6 +62,13 @@ struct FontKey {
     font_family: SharedString,
     font_features: FontFeatures,
     font_fallbacks: Option<FontFallbacks>,
+    font_weight: FontWeight,
+}
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct NativeFontKey {
+    postscript_name: String,
+    weight: Option<i32>,
 }
 
 struct MacTextSystemState {
@@ -68,7 +76,7 @@ struct MacTextSystemState {
     system_source: SystemSource,
     fonts: Vec<FontKitFont>,
     font_selections: HashMap<Font, FontId>,
-    font_ids_by_postscript_name: HashMap<String, FontId>,
+    font_ids_by_native_key: HashMap<NativeFontKey, FontId>,
     font_ids_by_font_key: HashMap<FontKey, SmallVec<[FontId; 4]>>,
     postscript_names_by_font_id: HashMap<FontId, String>,
 }
@@ -81,7 +89,7 @@ impl MacTextSystem {
             system_source: SystemSource::new(),
             fonts: Vec::new(),
             font_selections: HashMap::default(),
-            font_ids_by_postscript_name: HashMap::default(),
+            font_ids_by_native_key: HashMap::default(),
             font_ids_by_font_key: HashMap::default(),
             postscript_names_by_font_id: HashMap::default(),
         }))
@@ -134,6 +142,9 @@ impl PlatformTextSystem for MacTextSystem {
     }
 
     fn font_id(&self, font: &Font) -> Result<FontId> {
+        let mut font = font.clone();
+        font.weight = normalized_font_weight(font.weight);
+        let font = &font;
         let lock = self.0.upgradable_read();
         if let Some(font_id) = lock.font_selections.get(font) {
             Ok(*font_id)
@@ -143,19 +154,33 @@ impl PlatformTextSystem for MacTextSystem {
                 font_family: font.family.clone(),
                 font_features: font.features.clone(),
                 font_fallbacks: font.fallbacks.clone(),
+                font_weight: font.weight,
             };
             let candidates = if let Some(font_ids) = lock.font_ids_by_font_key.get(&font_key) {
-                font_ids.as_slice()
+                font_ids.clone()
             } else {
-                let font_ids =
-                    lock.load_family(&font.family, &font.features, font.fallbacks.as_ref())?;
-                lock.font_ids_by_font_key.insert(font_key.clone(), font_ids);
-                lock.font_ids_by_font_key[&font_key].as_ref()
+                let font_ids = lock.load_family(
+                    &font.family,
+                    &font.features,
+                    font.fallbacks.as_ref(),
+                    font.weight,
+                )?;
+                lock.font_ids_by_font_key
+                    .insert(font_key.clone(), font_ids.clone());
+                font_ids
             };
 
             let candidate_properties = candidates
                 .iter()
-                .map(|font_id| lock.fonts[font_id.0].properties())
+                .map(|font_id| {
+                    let candidate = &lock.fonts[font_id.0];
+                    let mut properties = candidate.properties();
+                    if let Some(axis) = weight_axis(&candidate.native_font()) {
+                        properties.weight =
+                            FontkitWeight(font.weight.0.clamp(axis.minimum, axis.maximum));
+                    }
+                    properties
+                })
                 .collect::<SmallVec<[_; 4]>>();
 
             let ix = font_kit::matching::find_best_match(
@@ -167,7 +192,7 @@ impl PlatformTextSystem for MacTextSystem {
                 },
             )?;
 
-            let font_id = candidates[ix];
+            let font_id = lock.font_instance(candidates[ix], font.weight)?;
             lock.font_selections.insert(font.clone(), font_id);
             Ok(font_id)
         }
@@ -278,6 +303,7 @@ impl MacTextSystemState {
         name: &str,
         features: &FontFeatures,
         fallbacks: Option<&FontFallbacks>,
+        weight: FontWeight,
     ) -> Result<SmallVec<[FontId; 4]>> {
         let name = gpui::font_name_with_fallbacks(name, ".AppleSystemUIFont");
 
@@ -290,7 +316,7 @@ impl MacTextSystemState {
         for font in family.fonts() {
             let mut font = font.load()?;
 
-            apply_features_and_fallbacks(&mut font, features, fallbacks)?;
+            apply_features_and_fallbacks(&mut font, features, fallbacks, weight)?;
             // This block contains a precautionary fix to guard against loading fonts
             // that might cause panics due to `.unwrap()`s up the chain.
             {
@@ -359,7 +385,7 @@ impl MacTextSystemState {
             // Dedup is scoped to this single `load_family` call (issue #55472).
             // The same family can be reloaded later under a different `FontKey`
             // (different features/fallbacks); a global check against
-            // `font_ids_by_postscript_name` would skip every already-registered
+            // `font_ids_by_native_key` would skip every already-registered
             // font and leave the second call's `font_ids` empty.
             if !postscript_names_seen.insert(postscript_name.clone()) {
                 log::warn!(
@@ -373,13 +399,40 @@ impl MacTextSystemState {
             }
             let font_id = FontId(self.fonts.len());
             font_ids.push(font_id);
-            self.font_ids_by_postscript_name
-                .insert(postscript_name.clone(), font_id);
+            self.font_ids_by_native_key
+                .insert(native_font_key(&font.native_font()), font_id);
             self.postscript_names_by_font_id
                 .insert(font_id, postscript_name);
             self.fonts.push(font);
         }
         Ok(font_ids)
+    }
+
+    fn font_instance(
+        &mut self,
+        base_font_id: FontId,
+        requested_weight: FontWeight,
+    ) -> Result<FontId> {
+        let base_font = &self.fonts[base_font_id.0];
+        let native_font = base_font.native_font();
+        let Some(axis) = weight_axis(&native_font) else {
+            return Ok(base_font_id);
+        };
+        let effective_weight = requested_weight.0.clamp(axis.minimum, axis.maximum);
+        if (axis.current_value(&native_font) - effective_weight).abs() < f32::EPSILON {
+            return Ok(base_font_id);
+        }
+
+        let requested_font = create_weight_instance(&native_font, &axis, effective_weight)?;
+        let key = native_font_key(&requested_font);
+        let font_id = FontId(self.fonts.len());
+        let postscript_name = requested_font.postscript_name();
+        self.font_ids_by_native_key.insert(key, font_id);
+        self.postscript_names_by_font_id
+            .insert(font_id, postscript_name);
+        self.fonts
+            .push(unsafe { FontKitFont::from_native_font(&requested_font) });
+        Ok(font_id)
     }
 
     fn advance(&self, font_id: FontId, glyph_id: GlyphId) -> Result<Size<f32>> {
@@ -393,19 +446,17 @@ impl MacTextSystemState {
     }
 
     fn id_for_native_font(&mut self, requested_font: CTFont) -> FontId {
-        let postscript_name = requested_font.postscript_name();
-        if let Some(font_id) = self.font_ids_by_postscript_name.get(&postscript_name) {
+        let key = native_font_key(&requested_font);
+        if let Some(font_id) = self.font_ids_by_native_key.get(&key) {
             *font_id
         } else {
             let font_id = FontId(self.fonts.len());
-            self.font_ids_by_postscript_name
-                .insert(postscript_name.clone(), font_id);
+            let postscript_name = requested_font.postscript_name();
+            self.font_ids_by_native_key.insert(key, font_id);
             self.postscript_names_by_font_id
                 .insert(font_id, postscript_name);
             self.fonts
-                .push(font_kit::font::Font::from_core_graphics_font(
-                    requested_font.copy_to_CGFont(),
-                ));
+                .push(unsafe { FontKitFont::from_native_font(&requested_font) });
             font_id
         }
     }
@@ -711,8 +762,117 @@ fn size_from_vector2f(vec: Vector2F) -> Size<f32> {
     size(vec.x(), vec.y())
 }
 
+const WEIGHT_AXIS_IDENTIFIER: i64 = u32::from_be_bytes(*b"wght") as i64;
+
+struct WeightAxis {
+    minimum: f32,
+    maximum: f32,
+    default: f32,
+}
+
+impl WeightAxis {
+    fn current_value(&self, font: &CTFont) -> f32 {
+        let variations = unsafe { CTFontCopyVariation(font.as_concrete_TypeRef()) };
+        if variations.is_null() {
+            return self.default;
+        }
+        let variations: CFDictionary<CFNumber, CFNumber> =
+            unsafe { TCFType::wrap_under_create_rule(variations) };
+        variations
+            .find(CFNumber::from(WEIGHT_AXIS_IDENTIFIER))
+            .and_then(|value| value.to_f64())
+            .map_or(self.default, |value| value as f32)
+    }
+}
+
+fn weight_axis(font: &CTFont) -> Option<WeightAxis> {
+    let axes = font.get_variation_axes()?;
+    for axis in axes.iter() {
+        let identifier = axis_identifier(&axis)?;
+        if identifier != WEIGHT_AXIS_IDENTIFIER {
+            continue;
+        }
+        return Some(WeightAxis {
+            minimum: axis_number(&axis, unsafe { kCTFontVariationAxisMinimumValueKey })?,
+            maximum: axis_number(&axis, unsafe { kCTFontVariationAxisMaximumValueKey })?,
+            default: axis_number(&axis, unsafe { kCTFontVariationAxisDefaultValueKey })?,
+        });
+    }
+    None
+}
+
+fn axis_identifier(axis: &CFDictionary<CFString, CFType>) -> Option<i64> {
+    let key = unsafe { CFString::wrap_under_get_rule(kCTFontVariationAxisIdentifierKey) };
+    axis.find(key)
+        .and_then(|value| value.downcast::<CFNumber>())
+        .and_then(|value| value.to_i64())
+}
+
+fn axis_number(axis: &CFDictionary<CFString, CFType>, key: CFStringRef) -> Option<f32> {
+    let key = unsafe { CFString::wrap_under_get_rule(key) };
+    axis.find(key)
+        .and_then(|value| value.downcast::<CFNumber>())
+        .and_then(|value| value.to_f64())
+        .map(|value| value as f32)
+}
+
+fn create_weight_instance(font: &CTFont, axis: &WeightAxis, weight: f32) -> Result<CTFont> {
+    let identifier = CFNumber::from(WEIGHT_AXIS_IDENTIFIER);
+    let descriptor = unsafe {
+        CTFontDescriptorCreateCopyWithVariation(
+            font.copy_descriptor().as_concrete_TypeRef(),
+            identifier.as_concrete_TypeRef(),
+            weight.clamp(axis.minimum, axis.maximum) as CGFloat,
+        )
+    };
+    if descriptor.is_null() {
+        return Err(anyhow!(
+            "CoreText failed to create a variable font descriptor"
+        ));
+    }
+    let descriptor = unsafe { CTFontDescriptor::wrap_under_create_rule(descriptor) };
+    Ok(core_text::font::new_from_descriptor(
+        &descriptor,
+        font.pt_size(),
+    ))
+}
+
+fn native_font_key(font: &CTFont) -> NativeFontKey {
+    NativeFontKey {
+        postscript_name: font.postscript_name(),
+        weight: weight_axis(font).map(|axis| axis.current_value(font).round() as i32),
+    }
+}
+
+#[link(name = "CoreText", kind = "framework")]
+unsafe extern "C" {
+    static kCTFontVariationAxisIdentifierKey: CFStringRef;
+    static kCTFontVariationAxisMinimumValueKey: CFStringRef;
+    static kCTFontVariationAxisMaximumValueKey: CFStringRef;
+    static kCTFontVariationAxisDefaultValueKey: CFStringRef;
+
+    fn CTFontCopyVariation(font: CTFontRef) -> CFDictionaryRef;
+    fn CTFontDescriptorCreateCopyWithVariation(
+        original: CTFontDescriptorRef,
+        variation_identifier: CFNumberRef,
+        variation_value: CGFloat,
+    ) -> CTFontDescriptorRef;
+}
+
 fn fontkit_weight(value: FontWeight) -> FontkitWeight {
     FontkitWeight(value.0)
+}
+
+fn normalized_font_weight(weight: FontWeight) -> FontWeight {
+    FontWeight(
+        if weight.0.is_finite() {
+            weight.0
+        } else {
+            FontWeight::NORMAL.0
+        }
+        .clamp(1.0, 1000.0)
+        .round(),
+    )
 }
 
 fn fontkit_style(style: FontStyle) -> FontkitStyle {

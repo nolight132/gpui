@@ -113,18 +113,21 @@ impl TextSystem {
             }
         }
 
+        let mut font = font.clone();
+        font.weight = font.weight.normalized_for_cache();
+
         let font_id = self
             .font_ids_by_font
             .read()
-            .get(font)
+            .get(&font)
             .map(clone_font_id_result);
         if let Some(font_id) = font_id {
             font_id
         } else {
-            let font_id = self.platform_text_system.font_id(font);
+            let font_id = self.platform_text_system.font_id(&font);
             self.font_ids_by_font
                 .write()
-                .insert(font.clone(), clone_font_id_result(&font_id));
+                .insert(font, clone_font_id_result(&font_id));
             font_id
         }
     }
@@ -151,7 +154,11 @@ impl TextSystem {
             return font_id;
         }
         for fallback in &self.fallback_font_stack {
-            if let Ok(font_id) = self.font_id(fallback) {
+            let mut fallback = fallback.clone();
+            fallback.weight = font.weight;
+            fallback.style = font.style;
+            fallback.features = font.features.clone();
+            if let Ok(font_id) = self.font_id(&fallback) {
                 return font_id;
             }
         }
@@ -915,6 +922,14 @@ impl Hash for FontWeight {
 impl Eq for FontWeight {}
 
 impl FontWeight {
+    /// The cache granularity for variable font weight instances.
+    ///
+    /// One OpenType weight unit is fine enough for smooth animation while bounding the
+    /// registered `wght` scale to 1000 distinct cached instances per font configuration.
+    const CACHE_STEP: f32 = 1.0;
+    const CACHE_MIN: f32 = 1.0;
+    const CACHE_MAX: f32 = 1000.0;
+
     /// Thin weight (100), the thinnest value.
     pub const THIN: FontWeight = FontWeight(100.0);
     /// Extra light weight (200).
@@ -946,6 +961,18 @@ impl FontWeight {
         Self::EXTRA_BOLD,
         Self::BLACK,
     ];
+
+    fn normalized_for_cache(self) -> Self {
+        let weight = if self.0.is_finite() {
+            self.0
+        } else {
+            Self::NORMAL.0
+        };
+        Self(
+            (weight.clamp(Self::CACHE_MIN, Self::CACHE_MAX) / Self::CACHE_STEP).round()
+                * Self::CACHE_STEP,
+        )
+    }
 }
 
 impl schemars::JsonSchema for FontWeight {
@@ -1203,5 +1230,26 @@ pub fn font_name_with_fallbacks_shared<'a>(
         ".ZedSans" | "Zed Plex Sans" => const { &SharedString::new_static("IBM Plex Sans") },
         ".ZedMono" | "Zed Plex Mono" => const { &SharedString::new_static("Lilex") },
         _ => name,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn font_weight_cache_normalization_is_bounded_and_stable() {
+        assert_eq!(FontWeight(537.49).normalized_for_cache(), FontWeight(537.0));
+        assert_eq!(FontWeight(537.5).normalized_for_cache(), FontWeight(538.0));
+        assert_eq!(FontWeight(950.0).normalized_for_cache(), FontWeight(950.0));
+        assert_eq!(FontWeight(-1000.0).normalized_for_cache(), FontWeight(1.0));
+        assert_eq!(
+            FontWeight(5000.0).normalized_for_cache(),
+            FontWeight(1000.0)
+        );
+        assert_eq!(
+            FontWeight(f32::NAN).normalized_for_cache(),
+            FontWeight::NORMAL
+        );
     }
 }

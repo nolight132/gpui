@@ -6,7 +6,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use collections::HashMap;
-use gpui_util::{ResultExt, maybe};
+use gpui_util::ResultExt;
 use parking_lot::{RwLock, RwLockUpgradableReadGuard};
 use windows::{
     Win32::{
@@ -30,6 +30,9 @@ use gpui::*;
 struct FontInfo {
     font_family_h: HSTRING,
     font_face: IDWriteFontFace3,
+    /// Canonical values reported by the exact DirectWrite variable instance.
+    /// Empty for static faces so the legacy weight/stretch/style path is unchanged.
+    axis_values: Vec<DWRITE_FONT_AXIS_VALUE>,
     features: IDWriteTypography,
     fallbacks: Option<IDWriteFontFallback>,
     font_collection: IDWriteFontCollection1,
@@ -233,6 +236,9 @@ impl PlatformTextSystem for DirectWriteTextSystem {
     }
 
     fn font_id(&self, font: &Font) -> Result<FontId> {
+        let mut font = font.clone();
+        font.weight = normalized_font_weight(font.weight);
+        let font = &font;
         let lock = self.state.upgradable_read();
         if let Some(font_id) = lock.font_to_font_id.get(font) {
             Ok(*font_id)
@@ -484,31 +490,50 @@ impl DirectWriteState {
                 .log_err()?
         };
         let total_number = unsafe { font.GetFontCount() };
+        let mut best_match: Option<(f32, IDWriteFontFace3, Vec<DWRITE_FONT_AXIS_VALUE>)> = None;
         for index in 0..total_number {
-            let res = maybe!({
-                let font_face_ref = unsafe { font.GetFontFaceReference(index).log_err()? };
-                let font_face = unsafe { font_face_ref.CreateFontFace().log_err()? };
-                let direct_write_features =
-                    unsafe { Self::generate_font_features(factory, features).log_err()? };
-                let fallbacks = fallbacks.as_ref().and_then(|fallbacks| {
-                    Self::generate_font_fallbacks(fallbacks, factory, system_font_collection)
-                        .log_err()
-                        .flatten()
-                });
-                let font_info = FontInfo {
-                    font_family_h: font_family_h.clone(),
-                    font_face,
-                    features: direct_write_features,
-                    fallbacks,
-                    font_collection: collection.clone(),
-                };
-                Some(font_info)
-            });
-            if res.is_some() {
-                return res;
+            let Some(font_face_ref) = (unsafe { font.GetFontFaceReference(index).log_err() })
+            else {
+                continue;
+            };
+            let Some((font_face, axis_values)) =
+                (unsafe { create_weight_instance(&font_face_ref, weight).log_err() })
+            else {
+                continue;
+            };
+            let effective_weight = axis_values
+                .iter()
+                .find(|value| value.axisTag == DWRITE_FONT_AXIS_TAG_WEIGHT)
+                .map_or_else(
+                    || unsafe { font_face.GetWeight().0 as f32 },
+                    |value| value.value,
+                );
+            let style_distance =
+                dwrite_style_distance(unsafe { font_face.GetStyle() }, font_style_to_dwrite(style));
+            let score = style_distance * 10_000.0 + (effective_weight - weight.0).abs();
+            if best_match
+                .as_ref()
+                .is_none_or(|(best_score, _, _)| score < *best_score)
+            {
+                best_match = Some((score, font_face, axis_values));
             }
         }
-        None
+        let (_, font_face, axis_values) = best_match?;
+        let direct_write_features =
+            unsafe { Self::generate_font_features(factory, features).log_err()? };
+        let fallbacks = fallbacks.as_ref().and_then(|fallbacks| {
+            Self::generate_font_fallbacks(fallbacks, factory, system_font_collection)
+                .log_err()
+                .flatten()
+        });
+        Some(FontInfo {
+            font_family_h,
+            font_face,
+            axis_values,
+            features: direct_write_features,
+            fallbacks,
+            font_collection: collection.clone(),
+        })
     }
 
     fn layout_line(
@@ -535,7 +560,7 @@ impl DirectWriteState {
                 let first_run = &font_runs[0];
                 let font_info = &self.fonts[first_run.font_id.0];
                 let collection = &font_info.font_collection;
-                let format: IDWriteTextFormat1 = components
+                let format: IDWriteTextFormat3 = components
                     .factory
                     .CreateTextFormat(
                         &font_info.font_family_h,
@@ -547,16 +572,17 @@ impl DirectWriteState {
                         &components.locale,
                     )?
                     .cast()?;
+                if !font_info.axis_values.is_empty() {
+                    format.SetFontAxisValues(&font_info.axis_values)?;
+                }
                 if let Some(ref fallbacks) = font_info.fallbacks {
                     format.SetFontFallback(fallbacks)?;
                 }
 
-                let layout = components.factory.CreateTextLayout(
-                    text_wide,
-                    &format,
-                    f32::INFINITY,
-                    f32::INFINITY,
-                )?;
+                let layout: IDWriteTextLayout4 = components
+                    .factory
+                    .CreateTextLayout(text_wide, &format, f32::INFINITY, f32::INFINITY)?
+                    .cast()?;
                 let current_text = &text[utf8_offset..(utf8_offset + first_run.len)];
                 utf8_offset += first_run.len;
                 let current_text_utf16_length = current_text.encode_utf16().count() as u32;
@@ -565,6 +591,9 @@ impl DirectWriteState {
                     length: current_text_utf16_length,
                 };
                 layout.SetTypography(&font_info.features, text_range)?;
+                if !font_info.axis_values.is_empty() {
+                    layout.SetFontAxisValues(&font_info.axis_values, text_range)?;
+                }
                 utf16_offset += current_text_utf16_length;
 
                 layout
@@ -602,6 +631,9 @@ impl DirectWriteState {
                 text_layout.SetFontSize(font_size, text_range)?;
                 text_layout.SetFontStyle(font_info.font_face.GetStyle(), text_range)?;
                 text_layout.SetFontWeight(font_info.font_face.GetWeight(), text_range)?;
+                if !font_info.axis_values.is_empty() {
+                    text_layout.SetFontAxisValues(&font_info.axis_values, text_range)?;
+                }
                 text_layout.SetTypography(&font_info.features, text_range)?;
 
                 break_ligatures = !break_ligatures;
@@ -1713,12 +1745,83 @@ fn font_style_from_dwrite(value: DWRITE_FONT_STYLE) -> FontStyle {
     }
 }
 
+fn dwrite_style_distance(actual: DWRITE_FONT_STYLE, requested: DWRITE_FONT_STYLE) -> f32 {
+    if actual == requested {
+        0.0
+    } else if actual != DWRITE_FONT_STYLE_NORMAL && requested != DWRITE_FONT_STYLE_NORMAL {
+        1.0
+    } else {
+        2.0
+    }
+}
+
+unsafe fn create_weight_instance(
+    font_face_ref: &IDWriteFontFaceReference,
+    requested_weight: FontWeight,
+) -> Result<(IDWriteFontFace3, Vec<DWRITE_FONT_AXIS_VALUE>)> {
+    let Ok(font_face_ref1) = font_face_ref.cast::<IDWriteFontFaceReference1>() else {
+        return Ok((unsafe { font_face_ref.CreateFontFace()? }, Vec::new()));
+    };
+    let base_face = unsafe { font_face_ref1.CreateFontFace()? };
+    let resource = unsafe { base_face.GetFontResource()? };
+    let mut ranges =
+        vec![DWRITE_FONT_AXIS_RANGE::default(); unsafe { resource.GetFontAxisCount() } as usize];
+    unsafe { resource.GetFontAxisRanges(&mut ranges)? };
+    let Some(weight_range) = ranges
+        .iter()
+        .find(|range| range.axisTag == DWRITE_FONT_AXIS_TAG_WEIGHT)
+    else {
+        return Ok((base_face.cast()?, Vec::new()));
+    };
+
+    let mut axis_values = vec![
+        DWRITE_FONT_AXIS_VALUE::default();
+        unsafe { font_face_ref1.GetFontAxisValueCount() } as usize
+    ];
+    unsafe { font_face_ref1.GetFontAxisValues(&mut axis_values)? };
+    let effective_weight = requested_weight
+        .0
+        .clamp(weight_range.minValue, weight_range.maxValue);
+    if let Some(value) = axis_values
+        .iter_mut()
+        .find(|value| value.axisTag == DWRITE_FONT_AXIS_TAG_WEIGHT)
+    {
+        value.value = effective_weight;
+    } else {
+        axis_values.push(DWRITE_FONT_AXIS_VALUE {
+            axisTag: DWRITE_FONT_AXIS_TAG_WEIGHT,
+            value: effective_weight,
+        });
+    }
+
+    let font_face =
+        unsafe { resource.CreateFontFace(font_face_ref1.GetSimulations(), &axis_values)? };
+    let mut canonical_values = vec![
+        DWRITE_FONT_AXIS_VALUE::default();
+        unsafe { font_face.GetFontAxisValueCount() } as usize
+    ];
+    unsafe { font_face.GetFontAxisValues(&mut canonical_values)? };
+    Ok((font_face.cast()?, canonical_values))
+}
+
 fn font_weight_to_dwrite(weight: FontWeight) -> DWRITE_FONT_WEIGHT {
     DWRITE_FONT_WEIGHT(weight.0 as i32)
 }
 
 fn font_weight_from_dwrite(value: DWRITE_FONT_WEIGHT) -> FontWeight {
     FontWeight(value.0 as f32)
+}
+
+fn normalized_font_weight(weight: FontWeight) -> FontWeight {
+    FontWeight(
+        if weight.0.is_finite() {
+            weight.0
+        } else {
+            FontWeight::NORMAL.0
+        }
+        .clamp(1.0, 1000.0)
+        .round(),
+    )
 }
 
 fn get_font_names_from_collection(
@@ -1748,12 +1851,26 @@ fn get_font_names_from_collection(
 fn font_face_to_font(font_face: &IDWriteFontFace3, locale: &HSTRING) -> Option<Font> {
     let localized_family_name = unsafe { font_face.GetFamilyNames().log_err() }?;
     let family_name = get_name(localized_family_name, locale).log_err()?;
-    let weight = unsafe { font_face.GetWeight() };
+    let weight = font_face
+        .cast::<IDWriteFontFace5>()
+        .ok()
+        .and_then(|font_face| {
+            let mut values = vec![
+                DWRITE_FONT_AXIS_VALUE::default();
+                unsafe { font_face.GetFontAxisValueCount() } as usize
+            ];
+            unsafe { font_face.GetFontAxisValues(&mut values).log_err()? };
+            values
+                .into_iter()
+                .find(|value| value.axisTag == DWRITE_FONT_AXIS_TAG_WEIGHT)
+                .map(|value| FontWeight(value.value))
+        })
+        .unwrap_or_else(|| font_weight_from_dwrite(unsafe { font_face.GetWeight() }));
     let style = unsafe { font_face.GetStyle() };
     Some(Font {
         family: family_name.into(),
         features: FontFeatures::default(),
-        weight: font_weight_from_dwrite(weight),
+        weight,
         style: font_style_from_dwrite(style),
         fallbacks: None,
     })

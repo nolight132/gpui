@@ -10,7 +10,7 @@ use core_foundation::{
     dictionary::{
         CFDictionaryCreate, kCFTypeDictionaryKeyCallBacks, kCFTypeDictionaryValueCallBacks,
     },
-    number::CFNumber,
+    number::{CFNumber, CFNumberRef},
     string::{CFString, CFStringRef},
 };
 use core_foundation_sys::locale::CFLocaleCopyPreferredLanguages;
@@ -28,13 +28,14 @@ use core_text::{
     },
 };
 use font_kit::font::Font as FontKitFont;
-use gpui::{FontFallbacks, FontFeatures};
+use gpui::{FontFallbacks, FontFeatures, FontWeight};
 use std::ptr;
 
 pub fn apply_features_and_fallbacks(
     font: &mut FontKitFont,
     features: &FontFeatures,
     fallbacks: Option<&FontFallbacks>,
+    weight: FontWeight,
 ) -> anyhow::Result<()> {
     unsafe {
         let mut keys = vec![kCTFontFeatureSettingsAttribute];
@@ -43,7 +44,7 @@ pub fn apply_features_and_fallbacks(
             && !fallbacks.fallback_list().is_empty()
         {
             keys.push(kCTFontCascadeListAttribute);
-            values.push(generate_fallback_array(fallbacks, font));
+            values.push(generate_fallback_array(fallbacks, font, weight));
         }
         let attrs = CFDictionaryCreate(
             kCFAllocatorDefault,
@@ -99,17 +100,19 @@ fn generate_feature_array(features: &FontFeatures) -> CFMutableArrayRef {
     }
 }
 
-fn generate_fallback_array(fallbacks: &FontFallbacks, font: &mut FontKitFont) -> CFMutableArrayRef {
+fn generate_fallback_array(
+    fallbacks: &FontFallbacks,
+    font: &mut FontKitFont,
+    weight: FontWeight,
+) -> CFMutableArrayRef {
     unsafe {
         let symbolic_traits = font.native_font().symbolic_traits();
-        let all_traits = font.native_font().all_traits();
-
         let fallback_array = CFArrayCreateMutable(kCFAllocatorDefault, 0, &kCFTypeArrayCallBacks);
         for user_fallback in fallbacks.fallback_list() {
             let name = CFString::from(user_fallback.as_str());
 
             let traits_keys = [kCTFontWeightTrait, kCTFontSlantTrait];
-            let weight_value = CFNumber::from(all_traits.normalized_weight());
+            let weight_value = CFNumber::from(core_text_weight_trait(weight));
             let slant_value = CFNumber::from(if (symbolic_traits & kCTFontItalicTrait) != 0 {
                 1.0
             } else {
@@ -141,18 +144,23 @@ fn generate_fallback_array(fallbacks: &FontFallbacks, font: &mut FontKitFont) ->
 
             let fallback_desc = CTFontDescriptorCreateWithAttributes(attrs);
             CFRelease(attrs as _);
+            let fallback_desc = CTFontDescriptor::wrap_under_create_rule(fallback_desc);
+            let fallback_desc = descriptor_with_weight(&fallback_desc, weight);
 
-            CFArrayAppendValue(fallback_array, fallback_desc as _);
-            CFRelease(fallback_desc as _);
+            CFArrayAppendValue(fallback_array, fallback_desc.as_CFTypeRef());
         }
 
         let font_ref = font.native_font().as_concrete_TypeRef();
-        append_system_fallbacks(fallback_array, font_ref);
+        append_system_fallbacks(fallback_array, font_ref, weight);
         fallback_array
     }
 }
 
-fn append_system_fallbacks(fallback_array: CFMutableArrayRef, font_ref: CTFontRef) {
+fn append_system_fallbacks(
+    fallback_array: CFMutableArrayRef,
+    font_ref: CTFontRef,
+    weight: FontWeight,
+) {
     unsafe {
         let preferred_languages: CFArray<CFString> =
             CFArray::wrap_under_create_rule(CFLocaleCopyPreferredLanguages());
@@ -168,8 +176,37 @@ fn append_system_fallbacks(fallback_array: CFMutableArrayRef, font_ref: CTFontRe
             .iter()
             .filter(|desc| desc.font_path().is_some())
         {
+            let desc = descriptor_with_weight(&desc, weight);
             CFArrayAppendValue(fallback_array, desc.as_concrete_TypeRef() as _);
         }
+    }
+}
+
+const WEIGHT_AXIS_IDENTIFIER: i64 = u32::from_be_bytes(*b"wght") as i64;
+const CORE_TEXT_WEIGHT_MAPPING: [f32; 9] = [-0.7, -0.5, -0.23, 0.0, 0.2, 0.3, 0.4, 0.6, 0.8];
+
+fn core_text_weight_trait(weight: FontWeight) -> f32 {
+    let position = (weight.0.clamp(FontWeight::THIN.0, FontWeight::BLACK.0) - 100.0) / 100.0;
+    let lower = position.floor() as usize;
+    let upper = position.ceil() as usize;
+    let fraction = position - lower as f32;
+    CORE_TEXT_WEIGHT_MAPPING[lower]
+        + (CORE_TEXT_WEIGHT_MAPPING[upper] - CORE_TEXT_WEIGHT_MAPPING[lower]) * fraction
+}
+
+fn descriptor_with_weight(descriptor: &CTFontDescriptor, weight: FontWeight) -> CTFontDescriptor {
+    let identifier = CFNumber::from(WEIGHT_AXIS_IDENTIFIER);
+    let varied = unsafe {
+        CTFontDescriptorCreateCopyWithVariation(
+            descriptor.as_concrete_TypeRef(),
+            identifier.as_concrete_TypeRef(),
+            weight.0 as CGFloat,
+        )
+    };
+    if varied.is_null() {
+        unsafe { CTFontDescriptor::wrap_under_get_rule(descriptor.as_concrete_TypeRef()) }
+    } else {
+        unsafe { CTFontDescriptor::wrap_under_create_rule(varied) }
     }
 }
 
@@ -177,6 +214,12 @@ fn append_system_fallbacks(fallback_array: CFMutableArrayRef, font_ref: CTFontRe
 unsafe extern "C" {
     static kCTFontOpenTypeFeatureTag: CFStringRef;
     static kCTFontOpenTypeFeatureValue: CFStringRef;
+
+    fn CTFontDescriptorCreateCopyWithVariation(
+        original: CTFontDescriptorRef,
+        variation_identifier: CFNumberRef,
+        variation_value: CGFloat,
+    ) -> CTFontDescriptorRef;
 
     fn CTFontCreateCopyWithAttributes(
         font: CTFontRef,
