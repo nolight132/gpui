@@ -1407,7 +1407,7 @@ float4 mask_fragment(FilterFragmentInput input): SV_Target {
         || any(source_point >= source_end)
         || any(source_point < float2(0.0, 0.0))
         || any(source_point >= global_viewport_size)) {
-        return float4(0.0);
+        return float4(0.0, 0.0, 0.0, 0.0);
     }
 
     float top = source_point.y - params.fade_bounds.origin.y;
