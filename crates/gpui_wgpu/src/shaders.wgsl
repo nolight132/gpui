@@ -1305,20 +1305,19 @@ fn fs_msdf_sprite(input: MsdfSpriteVarying) -> @location(0) vec4<f32> {
     // MTSDF RGB channels contain independent pseudo-distances. Their median reconstructs the
     // signed distance while preserving corners that a single-channel field would round off.
     let sample = textureSample(t_sprite, s_sprite, input.tile_position);
-    let median_distance = max(min(sample.r, sample.g), min(max(sample.r, sample.g), sample.b)) - 0.5;
-    let true_distance = sample.a - 0.5;
-    // MTSDF's alpha channel is a true signed distance. Correct only large RGB edge-coloring errors
-    // (two generation texels at the fixed 64 px/em resolution), retaining the median field around
-    // ordinary sharp corners where its pseudo-distance is the useful part of MSDF.
-    let signs_disagree = median_distance * true_distance < 0.0;
-    let edge_coloring_error = abs(median_distance - true_distance) > 0.03125;
-    let signed_distance = select(median_distance, true_distance, signs_disagree || edge_coloring_error);
+    // Error correction is already baked into the generated field. Keep the true-distance alpha
+    // channel available for future soft effects, but decode the glyph contour from median RGB:
+    // substituting alpha around corners turns the sharp MSDF contour into a rounded SDF contour.
+    let signed_distance = max(min(sample.r, sample.g), min(max(sample.r, sample.g), sample.b)) - 0.5;
     let screen_distance = signed_distance * input.distance.x + input.distance.y;
-    // Helper invocations at a quad edge may sample beyond this atlas allocation. Bound their
-    // effect on fwidth with derivatives of the linear field coordinates, which remain valid when
-    // extrapolated and still account for scene transformations.
-    let derivative_bound = input.distance.x * length(fwidth(input.field_position));
-    let antialias_width = clamp(fwidth(screen_distance), 0.0001, max(derivative_bound, 0.0001));
+    // Derive the output scale from linear em coordinates instead of the sampled MSDF value.
+    // fwidth(signed_distance) spikes where the median changes channels at a corner, widening AA
+    // into an otherwise opaque stroke. Coordinate derivatives stay smooth across those corners
+    // and across helper invocations outside the atlas tile.
+    let inverse_screen_scale = 0.5 * input.distance.x * (
+        length(dpdx(input.field_position)) + length(dpdy(input.field_position))
+    );
+    let antialias_width = clamp(inverse_screen_scale, 0.0001, 1.0);
     let coverage = saturate(screen_distance / antialias_width + 0.5);
     let alpha_corrected = apply_contrast_and_gamma_correction(coverage, input.color.rgb, gamma_params.grayscale_enhanced_contrast, gamma_params.gamma_ratios);
 
