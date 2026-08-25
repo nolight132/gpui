@@ -22,7 +22,7 @@ impl Render for MsdfTextExample {
 
         let progress = 0.5 - 0.5 * (self.phase * std::f32::consts::TAU).cos();
         let embolden = px(-1.0 + 3.5 * progress);
-        let specimen = "A V O B 8 e g @ · а ф Ж · 漢字 · ◈ ◆ ✦";
+        let specimen = "t tt with just a touch · w ww · A V O B 8 e g @ · а ф Ж · 漢字 · ◈ ◆ ✦";
 
         div()
             .flex()
@@ -33,7 +33,11 @@ impl Render for MsdfTextExample {
             .bg(rgb(0x111318))
             .text_color(rgb(0xf4f5f7))
             .font_family("IBM Plex Sans")
-            .child(div().text_2xl().child("Raster and paint-only MTSDF text"))
+            .child(
+                div()
+                    .text_2xl()
+                    .child("Cross-platform raster and paint-only MTSDF text"),
+            )
             .child(
                 div()
                     .flex()

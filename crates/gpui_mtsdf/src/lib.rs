@@ -293,6 +293,43 @@ mod tests {
             .unwrap()
     }
 
+    fn overlapping_w_join() -> GlyphOutline {
+        let mut outline = OutlineBuilder::default();
+        // Two same-winding diagonal strokes overlap at the lower join, as happens in fonts that
+        // retain component overlap in a lowercase w.
+        outline.move_to(0.0, 100.0);
+        outline.line_to(18.0, 100.0);
+        outline.line_to(60.0, 0.0);
+        outline.line_to(42.0, 0.0);
+        outline.close();
+        outline.move_to(82.0, 100.0);
+        outline.line_to(100.0, 100.0);
+        outline.line_to(58.0, 0.0);
+        outline.line_to(40.0, 0.0);
+        outline.close();
+        outline
+            .finish(
+                OutlineBounds {
+                    min_x: 0.0,
+                    min_y: 0.0,
+                    max_x: 100.0,
+                    max_y: 100.0,
+                },
+                100.0,
+            )
+            .unwrap()
+    }
+
+    fn median_at(bytes: &[u8], width: usize, x: usize, y: usize) -> u8 {
+        let mut rgb = [
+            bytes[(y * width + x) * 4],
+            bytes[(y * width + x) * 4 + 1],
+            bytes[(y * width + x) * 4 + 2],
+        ];
+        rgb.sort_unstable();
+        rgb[1]
+    }
+
     #[test]
     fn overlapping_contours_keep_their_filled_intersection() -> Result<()> {
         let outline = overlapping_cross();
@@ -302,13 +339,25 @@ mod tests {
         let x = (info.raster_size.width.0 / 2) as usize;
         let y = (info.raster_size.height.0 / 2) as usize;
         let width = info.raster_size.width.0 as usize;
-        let mut rgb = [
-            bytes[(y * width + x) * 4],
-            bytes[(y * width + x) * 4 + 1],
-            bytes[(y * width + x) * 4 + 2],
-        ];
-        rgb.sort_unstable();
-        assert!(rgb[1] > 128, "overlapping native contours became a hole");
+        assert!(
+            median_at(&bytes, width, x, y) > 128,
+            "overlapping native contours became a hole"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn overlapping_w_join_stays_filled() -> Result<()> {
+        let outline = overlapping_w_join();
+        let params = MsdfGlyphParams::new(FontId(11), GlyphId(13));
+        let info = outline.glyph_info(&params)?;
+        let bytes = outline.rasterize(&params, info)?.unwrap();
+        let width = info.raster_size.width.0 as usize;
+        let height = info.raster_size.height.0 as usize;
+        assert!(
+            median_at(&bytes, width, width / 2, height * 4 / 5) > 128,
+            "overlapping lowercase-w join became a hole"
+        );
         Ok(())
     }
 

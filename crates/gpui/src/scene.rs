@@ -1267,6 +1267,20 @@ pub struct MsdfSprite {
     pub abi_padding: [u32; 2],
 }
 
+#[cfg(test)]
+mod msdf_sprite_tests {
+    use super::MsdfSprite;
+
+    #[test]
+    fn native_shader_instance_abi_is_stable() {
+        assert_eq!(std::mem::size_of::<MsdfSprite>(), 32 * 4);
+        assert_eq!(std::mem::align_of::<MsdfSprite>(), 4);
+        assert_eq!(std::mem::offset_of!(MsdfSprite, distance_scale), 28 * 4);
+        assert_eq!(std::mem::offset_of!(MsdfSprite, embolden), 29 * 4);
+        assert_eq!(std::mem::offset_of!(MsdfSprite, abi_padding), 30 * 4);
+    }
+}
+
 impl From<MsdfSprite> for Primitive {
     fn from(sprite: MsdfSprite) -> Self {
         Primitive::MsdfSprite(sprite)
