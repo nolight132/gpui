@@ -131,6 +131,7 @@ pub struct MetalRenderer {
     quads_pipeline_state: metal::RenderPipelineState,
     underlines_pipeline_state: metal::RenderPipelineState,
     monochrome_sprites_pipeline_state: metal::RenderPipelineState,
+    msdf_sprites_pipeline_state: metal::RenderPipelineState,
     polychrome_sprites_pipeline_state: metal::RenderPipelineState,
     surfaces_pipeline_state: metal::RenderPipelineState,
     backdrops_pipeline_state: metal::RenderPipelineState,
@@ -320,6 +321,14 @@ impl MetalRenderer {
             "monochrome_sprite_fragment",
             MTLPixelFormat::BGRA8Unorm,
         );
+        let msdf_sprites_pipeline_state = build_pipeline_state(
+            &device,
+            &library,
+            "msdf_sprites",
+            "msdf_sprite_vertex",
+            "msdf_sprite_fragment",
+            MTLPixelFormat::BGRA8Unorm,
+        );
         let polychrome_sprites_pipeline_state = build_pipeline_state(
             &device,
             &library,
@@ -402,6 +411,7 @@ impl MetalRenderer {
             quads_pipeline_state,
             underlines_pipeline_state,
             monochrome_sprites_pipeline_state,
+            msdf_sprites_pipeline_state,
             polychrome_sprites_pipeline_state,
             surfaces_pipeline_state,
             backdrops_pipeline_state,
@@ -923,9 +933,13 @@ impl MetalRenderer {
                     viewport_size,
                     command_encoder,
                 ),
-                PrimitiveBatch::MsdfSprites { .. } => {
-                    unreachable!("Metal text backend falls back before scene insertion")
-                }
+                PrimitiveBatch::MsdfSprites { texture_id, range } => self.draw_msdf_sprites(
+                    texture_id,
+                    range,
+                    instance_bindings,
+                    viewport_size,
+                    command_encoder,
+                ),
                 PrimitiveBatch::SubpixelSprites { .. } => unreachable!(),
             }
         }
@@ -1561,6 +1575,55 @@ impl MetalRenderer {
         );
     }
 
+    fn draw_msdf_sprites(
+        &self,
+        texture_id: AtlasTextureId,
+        sprites: Range<usize>,
+        instance_bindings: &InstanceBindings,
+        viewport_size: Size<DevicePixels>,
+        command_encoder: &metal::RenderCommandEncoderRef,
+    ) {
+        if sprites.is_empty() {
+            return;
+        }
+
+        let texture = self.sprite_atlas.metal_texture(texture_id);
+        let texture_size = size(
+            DevicePixels(texture.width() as i32),
+            DevicePixels(texture.height() as i32),
+        );
+        command_encoder.set_render_pipeline_state(&self.msdf_sprites_pipeline_state);
+        command_encoder.set_vertex_buffer(
+            SpriteInputIndex::Vertices as u64,
+            Some(&self.unit_vertices),
+            0,
+        );
+        command_encoder.set_vertex_buffer(
+            SpriteInputIndex::Sprites as u64,
+            Some(&instance_bindings.msdf_sprites.buffer),
+            instance_bindings.msdf_sprites.offset as u64,
+        );
+        command_encoder.set_vertex_bytes(
+            SpriteInputIndex::ViewportSize as u64,
+            mem::size_of_val(&viewport_size) as u64,
+            &viewport_size as *const Size<DevicePixels> as *const _,
+        );
+        command_encoder.set_vertex_bytes(
+            SpriteInputIndex::AtlasTextureSize as u64,
+            mem::size_of_val(&texture_size) as u64,
+            &texture_size as *const Size<DevicePixels> as *const _,
+        );
+        command_encoder.set_fragment_texture(SpriteInputIndex::AtlasTexture as u64, Some(&texture));
+
+        command_encoder.draw_primitives_instanced_base_instance(
+            metal::MTLPrimitiveType::Triangle,
+            0,
+            6,
+            sprites.len() as u64,
+            sprites.start as u64,
+        );
+    }
+
     fn draw_polychrome_sprites(
         &self,
         texture_id: AtlasTextureId,
@@ -2022,6 +2085,7 @@ struct InstanceBindings {
     shadows: InstanceBinding,
     underlines: InstanceBinding,
     monochrome_sprites: InstanceBinding,
+    msdf_sprites: InstanceBinding,
     polychrome_sprites: InstanceBinding,
     surfaces: InstanceBinding,
 }
@@ -2033,6 +2097,7 @@ fn write_instances(scene: &Scene, writer: &mut InstanceBufferWriter) -> Result<I
         shadows: writer.write(&scene.shadows)?,
         underlines: writer.write(&scene.underlines)?,
         monochrome_sprites: writer.write(&scene.monochrome_sprites)?,
+        msdf_sprites: writer.write(&scene.msdf_sprites)?,
         polychrome_sprites: writer.write(&scene.polychrome_sprites)?,
         surfaces: writer.write_iter(scene.surfaces.iter().map(|surface| SurfaceBounds {
             bounds: surface.bounds,

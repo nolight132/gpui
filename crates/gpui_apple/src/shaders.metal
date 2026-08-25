@@ -672,6 +672,67 @@ fragment float4 monochrome_sprite_fragment(
   return color;
 }
 
+struct MsdfSpriteVertexOutput {
+  float4 position [[position]];
+  float2 tile_position;
+  float4 color [[flat]];
+  float2 distance [[flat]];
+  float4 clip_distance;
+  float2 field_position;
+};
+
+vertex MsdfSpriteVertexOutput msdf_sprite_vertex(
+    uint unit_vertex_id [[vertex_id]], uint sprite_id [[instance_id]],
+    constant float2 *unit_vertices [[buffer(SpriteInputIndex_Vertices)]],
+    constant MsdfSprite *sprites [[buffer(SpriteInputIndex_Sprites)]],
+    constant Size_DevicePixels *viewport_size
+    [[buffer(SpriteInputIndex_ViewportSize)]],
+    constant Size_DevicePixels *atlas_size
+    [[buffer(SpriteInputIndex_AtlasTextureSize)]]) {
+  float2 unit_vertex = unit_vertices[unit_vertex_id];
+  MsdfSprite sprite = sprites[sprite_id];
+  float4 device_position = to_device_position_transformed(
+      unit_vertex, sprite.bounds, sprite.transformation, viewport_size);
+  float4 clip_distance = distance_from_clip_rect_transformed(
+      unit_vertex, sprite.bounds, sprite.content_mask.bounds, sprite.transformation);
+  float2 tile_origin = float2(sprite.tile.bounds.origin.x, sprite.tile.bounds.origin.y);
+  float2 tile_size = float2(sprite.tile.bounds.size.width, sprite.tile.bounds.size.height);
+  float2 atlas_dimensions = float2(atlas_size->width, atlas_size->height);
+  float2 tile_position =
+      (tile_origin + 0.5 + unit_vertex * (tile_size - 1.0)) / atlas_dimensions;
+  float2 field_position = unit_vertex *
+      float2(sprite.bounds.size.width, sprite.bounds.size.height) / sprite.distance_scale;
+  return MsdfSpriteVertexOutput{
+      device_position,
+      tile_position,
+      hsla_to_rgba(sprite.color),
+      float2(sprite.distance_scale, sprite.embolden),
+      clip_distance,
+      field_position};
+}
+
+fragment float4 msdf_sprite_fragment(
+    MsdfSpriteVertexOutput input [[stage_in]],
+    texture2d<float> atlas_texture [[texture(SpriteInputIndex_AtlasTexture)]]) {
+  constexpr sampler atlas_texture_sampler(mag_filter::linear, min_filter::linear);
+  float4 sample = atlas_texture.sample(atlas_texture_sampler, input.tile_position);
+  float signed_distance =
+      max(min(sample.r, sample.g), min(max(sample.r, sample.g), sample.b)) - 0.5;
+  float screen_distance = signed_distance * input.distance.x + input.distance.y;
+  float inverse_screen_scale = 0.5 * input.distance.x *
+      (length(dfdx(input.field_position)) + length(dfdy(input.field_position)));
+  float antialias_width = clamp(inverse_screen_scale, 0.0001, 1.0);
+  float coverage = saturate(screen_distance / antialias_width + 0.5);
+
+  // Derivatives above must execute uniformly; apply clipping afterwards.
+  if (any(input.clip_distance < float4(0.0))) {
+    return float4(0.0);
+  }
+  float4 color = input.color;
+  color.a *= coverage;
+  return color;
+}
+
 struct PolychromeSpriteVertexOutput {
   float4 position [[position]];
   float2 tile_position;

@@ -14,13 +14,15 @@ use core_graphics::{
     color_space::CGColorSpace,
     context::{CGContext, CGTextDrawingMode},
     display::CGPoint,
+    geometry::CGAffineTransform,
+    path::CGPathElementType,
 };
 use core_text::{
     font::{CTFont, CTFontRef},
     font_collection::CTFontCollectionRef,
     font_descriptor::{
-        CTFontDescriptor, CTFontDescriptorRef, kCTFontSlantTrait, kCTFontSymbolicTrait,
-        kCTFontWeightTrait, kCTFontWidthTrait,
+        CTFontDescriptor, CTFontDescriptorRef, kCTFontOrientationDefault, kCTFontSlantTrait,
+        kCTFontSymbolicTrait, kCTFontWeightTrait, kCTFontWidthTrait,
     },
     line::CTLine,
     string_attributes::kCTFontAttributeName,
@@ -36,10 +38,11 @@ use font_kit::{
 };
 use gpui::{
     Bounds, DevicePixels, Font, FontFallbacks, FontFeatures, FontId, FontMetrics, FontRun,
-    FontStyle, FontWeight, GlyphId, Hsla, LineLayout, Pixels, PlatformTextSystem,
-    RenderGlyphParams, Result, Rgba, SUBPIXEL_VARIANTS_X, ShapedGlyph, ShapedRun, SharedString,
-    Size, TextRenderingMode, point, px, size, swap_rgba_pa_to_bgra,
+    FontStyle, FontWeight, GlyphId, Hsla, LineLayout, MsdfGlyphInfo, MsdfGlyphParams, Pixels,
+    PlatformTextSystem, RenderGlyphParams, Result, Rgba, SUBPIXEL_VARIANTS_X, ShapedGlyph,
+    ShapedRun, SharedString, Size, TextRenderingMode, point, px, size, swap_rgba_pa_to_bgra,
 };
+use gpui_mtsdf::{GlyphOutline as MsdfOutline, OutlineBounds, OutlineBuilder};
 use parking_lot::{RwLock, RwLockUpgradableReadGuard};
 use pathfinder_geometry::{
     rect::{RectF, RectI},
@@ -47,7 +50,7 @@ use pathfinder_geometry::{
     vector::Vector2F,
 };
 use smallvec::SmallVec;
-use std::{borrow::Cow, char, convert::TryFrom, sync::Arc, sync::OnceLock};
+use std::{borrow::Cow, cell::RefCell, char, convert::TryFrom, sync::Arc, sync::OnceLock};
 
 use crate::open_type::apply_features_and_fallbacks;
 
@@ -226,6 +229,30 @@ impl PlatformTextSystem for MacTextSystem {
         raster_bounds: Bounds<DevicePixels>,
     ) -> Result<(Size<DevicePixels>, Vec<u8>)> {
         self.0.read().rasterize_glyph(glyph_id, raster_bounds)
+    }
+
+    fn supports_msdf(&self) -> bool {
+        true
+    }
+
+    fn msdf_glyph_info(&self, params: &MsdfGlyphParams) -> Result<Option<MsdfGlyphInfo>> {
+        let lock = self.0.read();
+        let Some(outline) = lock.msdf_outline(params)? else {
+            return Ok(None);
+        };
+        Ok(Some(outline.glyph_info(params)?))
+    }
+
+    fn rasterize_msdf_glyph(
+        &self,
+        params: &MsdfGlyphParams,
+        info: MsdfGlyphInfo,
+    ) -> Result<Option<Vec<u8>>> {
+        let lock = self.0.read();
+        let Some(outline) = lock.msdf_outline(params)? else {
+            return Ok(None);
+        };
+        outline.rasterize(params, info)
     }
 
     fn layout_line(&self, text: &str, font_size: Pixels, font_runs: &[FontRun]) -> LineLayout {
@@ -467,6 +494,73 @@ impl MacTextSystemState {
             .is_some_and(|postscript_name| {
                 postscript_name == "AppleColorEmoji" || postscript_name == ".AppleColorEmojiUI"
             })
+    }
+
+    fn msdf_outline(&self, params: &MsdfGlyphParams) -> Result<Option<MsdfOutline>> {
+        if self.is_emoji(params.font_id) {
+            return Ok(None);
+        }
+        let Some(font) = self.fonts.get(params.font_id.0) else {
+            return Err(anyhow!("MSDF font id is not loaded"));
+        };
+        let native_font = font.native_font();
+        let units_per_em = native_font.units_per_em() as f64;
+        if units_per_em <= 0.0 {
+            return Ok(None);
+        }
+
+        // Changing only the point size preserves the exact CoreText descriptor and variation
+        // dictionary already represented by FontId while making path coordinates equal design
+        // units, which is the normalization expected by the shared generator.
+        let outline_font = native_font.clone_with_font_size(units_per_em as CGFloat);
+        let glyph = params.glyph_id.0 as CGGlyph;
+        let transform = CGAffineTransform::new(1.0, 0.0, 0.0, 1.0, 0.0, 0.0);
+        let Ok(path) = outline_font.create_path_for_glyph(glyph, &transform) else {
+            return Ok(None);
+        };
+        let bounds =
+            outline_font.get_bounding_rects_for_glyphs(kCTFontOrientationDefault, &[glyph]);
+        if bounds.size.width <= 0.0 || bounds.size.height <= 0.0 {
+            return Ok(None);
+        }
+
+        let builder = RefCell::new(OutlineBuilder::default());
+        path.apply(&|element| {
+            let points = element.points();
+            let mut builder = builder.borrow_mut();
+            match element.element_type {
+                CGPathElementType::MoveToPoint => {
+                    builder.move_to(points[0].x, points[0].y);
+                }
+                CGPathElementType::AddLineToPoint => {
+                    builder.line_to(points[0].x, points[0].y);
+                }
+                CGPathElementType::AddQuadCurveToPoint => {
+                    builder.quadratic_to(points[0].x, points[0].y, points[1].x, points[1].y);
+                }
+                CGPathElementType::AddCurveToPoint => {
+                    builder.cubic_to(
+                        points[0].x,
+                        points[0].y,
+                        points[1].x,
+                        points[1].y,
+                        points[2].x,
+                        points[2].y,
+                    );
+                }
+                CGPathElementType::CloseSubpath => builder.close(),
+            }
+        });
+
+        Ok(builder.into_inner().finish(
+            OutlineBounds {
+                min_x: bounds.origin.x,
+                min_y: bounds.origin.y,
+                max_x: bounds.origin.x + bounds.size.width,
+                max_y: bounds.origin.y + bounds.size.height,
+            },
+            units_per_em,
+        ))
     }
 
     fn raster_bounds(&self, params: &RenderGlyphParams) -> Result<Bounds<DevicePixels>> {

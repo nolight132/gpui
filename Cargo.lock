@@ -2687,6 +2687,7 @@ dependencies = [
  "futures",
  "gpui",
  "gpui_apple",
+ "gpui_mtsdf",
  "gpui_util",
  "image",
  "itertools 0.14.0",
