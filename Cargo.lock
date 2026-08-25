@@ -2722,6 +2722,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "gpui_mtsdf"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bymsdfgen-core",
+ "gpui",
+]
+
+[[package]]
 name = "gpui_platform"
 version = "0.1.0"
 dependencies = [
@@ -2754,13 +2763,13 @@ name = "gpui_wgpu"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "bymsdfgen-core",
  "bytemuck",
  "collections",
  "cosmic-text",
  "criterion",
  "etagere",
  "gpui",
+ "gpui_mtsdf",
  "gpui_util",
  "itertools 0.14.0",
  "log",
