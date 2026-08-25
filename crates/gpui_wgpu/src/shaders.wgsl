@@ -1257,6 +1257,78 @@ fn fs_mono_sprite(input: MonoSpriteVarying) -> @location(0) vec4<f32> {
     return blend_color(input.color, alpha_corrected);
 }
 
+// --- multi-channel signed-distance-field text --- //
+
+struct MsdfSprite {
+    order: u32,
+    pad: u32,
+    bounds: Bounds,
+    content_mask: Bounds,
+    color: Hsla,
+    tile: AtlasTile,
+    transformation: TransformationMatrix,
+    distance_scale: f32,
+    embolden: f32,
+    abi_padding: vec2<u32>,
+}
+
+struct MsdfSpriteVarying {
+    @builtin(position) position: vec4<f32>,
+    @location(0) tile_position: vec2<f32>,
+    @location(1) @interpolate(flat) color: vec4<f32>,
+    @location(2) @interpolate(flat) distance: vec2<f32>,
+    @location(3) clip_distances: vec4<f32>,
+    @location(4) field_position: vec2<f32>,
+}
+
+@vertex
+fn vs_msdf_sprite(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index) instance_id: u32) -> MsdfSpriteVarying {
+    let unit_vertex = vec2<f32>(f32(vertex_id & 1u), 0.5 * f32(vertex_id & 2u));
+    let sprite = load_msdf_sprite(instance_id);
+
+    var out = MsdfSpriteVarying();
+    out.position = to_device_position_transformed(unit_vertex, sprite.bounds, sprite.transformation);
+    // Stay on edge texel centers so linear filtering cannot pull channels from a neighbouring
+    // atlas allocation into the field's padding.
+    let atlas_size = vec2<f32>(textureDimensions(t_sprite, 0));
+    let tile_size = vec2<f32>(sprite.tile.bounds.size);
+    out.tile_position = (vec2<f32>(sprite.tile.bounds.origin) + vec2<f32>(0.5) + unit_vertex * (tile_size - vec2<f32>(1.0))) / atlas_size;
+    out.color = hsla_to_rgba(sprite.color);
+    out.distance = vec2<f32>(sprite.distance_scale, sprite.embolden);
+    out.clip_distances = distance_from_clip_rect_transformed(unit_vertex, sprite.bounds, sprite.content_mask, sprite.transformation);
+    out.field_position = unit_vertex * vec2<f32>(sprite.bounds.size) / sprite.distance_scale;
+    return out;
+}
+
+@fragment
+fn fs_msdf_sprite(input: MsdfSpriteVarying) -> @location(0) vec4<f32> {
+    // MTSDF RGB channels contain independent pseudo-distances. Their median reconstructs the
+    // signed distance while preserving corners that a single-channel field would round off.
+    let sample = textureSample(t_sprite, s_sprite, input.tile_position);
+    let median_distance = max(min(sample.r, sample.g), min(max(sample.r, sample.g), sample.b)) - 0.5;
+    let true_distance = sample.a - 0.5;
+    // MTSDF's alpha channel is a true signed distance. Correct only large RGB edge-coloring errors
+    // (two generation texels at the fixed 64 px/em resolution), retaining the median field around
+    // ordinary sharp corners where its pseudo-distance is the useful part of MSDF.
+    let signs_disagree = median_distance * true_distance < 0.0;
+    let edge_coloring_error = abs(median_distance - true_distance) > 0.03125;
+    let signed_distance = select(median_distance, true_distance, signs_disagree || edge_coloring_error);
+    let screen_distance = signed_distance * input.distance.x + input.distance.y;
+    // Helper invocations at a quad edge may sample beyond this atlas allocation. Bound their
+    // effect on fwidth with derivatives of the linear field coordinates, which remain valid when
+    // extrapolated and still account for scene transformations.
+    let derivative_bound = input.distance.x * length(fwidth(input.field_position));
+    let antialias_width = clamp(fwidth(screen_distance), 0.0001, max(derivative_bound, 0.0001));
+    let coverage = saturate(screen_distance / antialias_width + 0.5);
+    let alpha_corrected = apply_contrast_and_gamma_correction(coverage, input.color.rgb, gamma_params.grayscale_enhanced_contrast, gamma_params.gamma_ratios);
+
+    // Clip only after derivatives have been evaluated, as required by uniform control flow.
+    if (any(input.clip_distances < vec4<f32>(0.0))) {
+        return vec4<f32>(0.0);
+    }
+    return blend_color(input.color, alpha_corrected);
+}
+
 // --- polychrome sprites --- //
 
 struct PolychromeSprite {

@@ -10,19 +10,20 @@ use crate::{
     BoxShadow, Capslock, Context, Corners, CursorHideMode, CursorStyle, Decorations, DevicePixels,
     DispatchActionListener, DispatchNodeId, DispatchTree, DisplayId, Edges, Effect, Entity,
     EntityId, EventEmitter, FileDropEvent, Filter, FontId, Global, GlobalElementId, GlyphId,
-    GpuSpecs, Hsla, InputHandler, IsZero, KeyBinding, KeyContext, KeyDownEvent, KeyEvent,
-    Keystroke, KeystrokeEvent, LayerFilter, LayoutId, LineLayoutIndex, Modifiers,
-    ModifiersChangedEvent, MonochromeSprite, MouseButton, MouseEvent, MouseMoveEvent, MouseUpEvent,
-    Path, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler,
-    PlatformWindow, Point, PolychromeSprite, Priority, PromptButton, PromptLevel, Quad, Render,
-    RenderGlyphParams, RenderImage, RenderImageParams, RenderSvgParams, Replay, ResizeEdge,
-    SMOOTH_SVG_SCALE_FACTOR, SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledPixels, Scene, Shadow,
-    SharedString, Size, StrikethroughStyle, Style, SubpixelSprite, SubscriberSet, Subscription,
-    SystemWindowTab, SystemWindowTabController, TabStopMap, TaffyLayoutEngine, Task,
-    TextRenderingMode, TextStyle, TextStyleRefinement, ThermalState, TransformationMatrix,
-    Underline, UnderlineStyle, WindowAppearance, WindowBackgroundAppearance, WindowBounds,
-    WindowControls, WindowDecorations, WindowOptions, WindowParams, WindowTextSystem, point,
-    prelude::*, px, rems, size, transparent_black,
+    GlyphRenderMode, GpuSpecs, Hsla, InputHandler, IsZero, KeyBinding, KeyContext, KeyDownEvent,
+    KeyEvent, Keystroke, KeystrokeEvent, LayerFilter, LayoutId, LineLayoutIndex,
+    MIN_MSDF_DEVICE_FONT_SIZE, Modifiers, ModifiersChangedEvent, MonochromeSprite, MouseButton,
+    MouseEvent, MouseMoveEvent, MouseUpEvent, MsdfGlyphParams, MsdfSprite, Path, Pixels,
+    PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point,
+    PolychromeSprite, Priority, PromptButton, PromptLevel, Quad, Render, RenderGlyphParams,
+    RenderImage, RenderImageParams, RenderSvgParams, Replay, ResizeEdge, SMOOTH_SVG_SCALE_FACTOR,
+    SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledPixels, Scene, Shadow, SharedString, Size,
+    StrikethroughStyle, Style, SubpixelSprite, SubscriberSet, Subscription, SystemWindowTab,
+    SystemWindowTabController, TabStopMap, TaffyLayoutEngine, Task, TextRenderingMode, TextStyle,
+    TextStyleRefinement, ThermalState, TransformationMatrix, Underline, UnderlineStyle,
+    WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControls, WindowDecorations,
+    WindowOptions, WindowParams, WindowTextSystem, point, prelude::*, px, rems, size,
+    transparent_black,
 };
 
 /// A gaussian is cut off after three standard deviations.
@@ -4339,10 +4340,39 @@ impl Window {
         font_size: Pixels,
         color: Hsla,
     ) -> Result<()> {
+        self.paint_glyph_with_rendering(
+            origin,
+            font_id,
+            glyph_id,
+            font_size,
+            color,
+            GlyphRenderMode::PlatformRaster,
+            Pixels::ZERO,
+        )
+    }
+
+    pub(crate) fn paint_glyph_with_rendering(
+        &mut self,
+        origin: Point<Pixels>,
+        font_id: FontId,
+        glyph_id: GlyphId,
+        font_size: Pixels,
+        color: Hsla,
+        glyph_render_mode: GlyphRenderMode,
+        text_embolden: Pixels,
+    ) -> Result<()> {
         self.invalidator.debug_assert_paint();
 
-        let element_opacity = self.element_opacity();
         let scale_factor = self.scale_factor();
+        if glyph_render_mode == GlyphRenderMode::Msdf
+            && font_size.0 * scale_factor >= MIN_MSDF_DEVICE_FONT_SIZE
+            && self.text_system().supports_msdf()
+            && self.paint_msdf_glyph(origin, font_id, glyph_id, font_size, color, text_embolden)?
+        {
+            return Ok(());
+        }
+
+        let element_opacity = self.element_opacity();
         let glyph_origin = origin.scale(scale_factor);
 
         let quantized_origin = Point::new(
@@ -4407,6 +4437,66 @@ impl Window {
             }
         }
         Ok(())
+    }
+
+    /// Paints one generated MTSDF glyph and returns whether it handled the glyph. Unsupported
+    /// outline formats return `false` so the caller can use the platform rasterizer.
+    fn paint_msdf_glyph(
+        &mut self,
+        origin: Point<Pixels>,
+        font_id: FontId,
+        glyph_id: GlyphId,
+        font_size: Pixels,
+        color: Hsla,
+        text_embolden: Pixels,
+    ) -> Result<bool> {
+        let params = MsdfGlyphParams::new(font_id, glyph_id);
+        let Some(info) = self.text_system().msdf_glyph_info(&params)? else {
+            return Ok(false);
+        };
+
+        let Some(tile) = self
+            .sprite_atlas
+            .get_or_insert_with(&params.into(), &mut || {
+                let bytes = self.text_system().rasterize_msdf_glyph(&params, info)?;
+                Ok(bytes.map(|bytes| (info.raster_size, Cow::Owned(bytes))))
+            })?
+        else {
+            return Ok(false);
+        };
+
+        let scale_factor = self.scale_factor();
+        let distance_scale = font_size.0 * scale_factor;
+        let origin = origin.scale(scale_factor);
+        let bounds = Bounds {
+            origin: point(
+                ScaledPixels(origin.x.0 + info.bounds_em.origin.x * distance_scale),
+                ScaledPixels(origin.y.0 + info.bounds_em.origin.y * distance_scale),
+            ),
+            size: size(
+                ScaledPixels(info.bounds_em.size.width * distance_scale),
+                ScaledPixels(info.bounds_em.size.height * distance_scale),
+            ),
+        };
+
+        // The generated padding defines the maximum safe contour displacement. Keep half a device
+        // pixel for antialiasing so an animated contour cannot reach the tile boundary.
+        let safe_distance = (info.field_padding_em * distance_scale - 0.5).max(0.0);
+        let embolden = (text_embolden.0 * scale_factor).clamp(-safe_distance, safe_distance);
+
+        self.next_frame.scene.insert_primitive(MsdfSprite {
+            order: 0,
+            pad: 0,
+            bounds,
+            content_mask: self.snapped_content_mask(),
+            color: color.opacity(self.element_opacity()),
+            tile,
+            transformation: TransformationMatrix::unit(),
+            distance_scale,
+            embolden,
+            abi_padding: [0; 2],
+        });
+        Ok(true)
     }
 
     fn should_use_subpixel_rendering(&self, font_id: FontId, font_size: Pixels) -> bool {

@@ -38,9 +38,10 @@ use crate::{
     Action, AnyWindowHandle, App, AsyncWindowContext, BackgroundExecutor, Bounds,
     DEFAULT_WINDOW_SIZE, DevicePixels, DispatchEventResult, Edges, ExternalDragPayload, Font,
     FontId, FontMetrics, FontRun, ForegroundExecutor, GlyphId, GpuSpecs, Hsla, ImageSource, Keymap,
-    LineLayout, Pixels, PlatformGestures, PlatformInput, Point, Priority, RenderGlyphParams,
-    RenderImage, RenderImageParams, RenderSvgParams, Scene, ShapedGlyph, ShapedRun, SharedString,
-    Size, SvgRenderer, SystemWindowTab, Task, Window, WindowControlArea, hash, point, px, size,
+    LineLayout, MsdfGlyphInfo, MsdfGlyphParams, Pixels, PlatformGestures, PlatformInput, Point,
+    Priority, RenderGlyphParams, RenderImage, RenderImageParams, RenderSvgParams, Scene,
+    ShapedGlyph, ShapedRun, SharedString, Size, SvgRenderer, SystemWindowTab, Task, Window,
+    WindowControlArea, hash, point, px, size,
 };
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use anyhow::bail;
@@ -1091,6 +1092,23 @@ pub trait PlatformTextSystem: Send + Sync {
         params: &RenderGlyphParams,
         raster_bounds: Bounds<DevicePixels>,
     ) -> Result<(Size<DevicePixels>, Vec<u8>)>;
+    /// Whether this backend supports GPUI's true multi-channel distance-field text path.
+    fn supports_msdf(&self) -> bool {
+        false
+    }
+    /// Return generated-field geometry, or `None` when the glyph should safely fall back to the
+    /// platform rasterizer.
+    fn msdf_glyph_info(&self, _params: &MsdfGlyphParams) -> Result<Option<MsdfGlyphInfo>> {
+        Ok(None)
+    }
+    /// Generate an RGBA MTSDF for a prior successful [`PlatformTextSystem::msdf_glyph_info`].
+    fn rasterize_msdf_glyph(
+        &self,
+        _params: &MsdfGlyphParams,
+        _info: MsdfGlyphInfo,
+    ) -> Result<Option<Vec<u8>>> {
+        anyhow::bail!("MSDF text rendering is not supported by this backend")
+    }
     /// Layout a line of text with the given font runs.
     fn layout_line(&self, text: &str, font_size: Pixels, runs: &[FontRun]) -> LineLayout;
     /// Returns the recommended text rendering mode for the given font and size.
@@ -1272,6 +1290,7 @@ pub fn get_gamma_correction_ratios(gamma: f32) -> [f32; 4] {
 #[expect(missing_docs)]
 pub enum AtlasKey {
     Glyph(RenderGlyphParams),
+    MsdfGlyph(MsdfGlyphParams),
     Svg(RenderSvgParams),
     Image(RenderImageParams),
 }
@@ -1296,6 +1315,7 @@ impl AtlasKey {
                     AtlasTextureKind::Monochrome
                 }
             }
+            AtlasKey::MsdfGlyph(_) => AtlasTextureKind::Msdf,
             AtlasKey::Svg(_) => AtlasTextureKind::Monochrome,
             AtlasKey::Image(_) => AtlasTextureKind::Polychrome,
         }
@@ -1305,6 +1325,12 @@ impl AtlasKey {
 impl From<RenderGlyphParams> for AtlasKey {
     fn from(params: RenderGlyphParams) -> Self {
         Self::Glyph(params)
+    }
+}
+
+impl From<MsdfGlyphParams> for AtlasKey {
+    fn from(params: MsdfGlyphParams) -> Self {
+        Self::MsdfGlyph(params)
     }
 }
 
@@ -1410,6 +1436,8 @@ pub enum AtlasTextureKind {
     Monochrome = 0,
     Polychrome = 1,
     Subpixel = 2,
+    /// Linear RGBA texture carrying multi-channel signed distances.
+    Msdf = 3,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]

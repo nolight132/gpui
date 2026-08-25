@@ -1,7 +1,7 @@
 use crate::{
-    App, Bounds, DevicePixels, Half, Hsla, LineLayout, Pixels, Point, RenderGlyphParams, Result,
-    SharedString, StrikethroughStyle, TextAlign, UnderlineStyle, Window, WrapBoundary,
-    WrappedLineLayout, black, fill, point, px, size,
+    App, Bounds, DevicePixels, GlyphRenderMode, Half, Hsla, LineLayout, Pixels, Point,
+    RenderGlyphParams, Result, SharedString, StrikethroughStyle, TextAlign, UnderlineStyle, Window,
+    WrapBoundary, WrappedLineLayout, black, fill, point, px, size,
 };
 use derive_more::{Deref, DerefMut};
 use smallvec::SmallVec;
@@ -27,6 +27,12 @@ pub struct DecorationRun {
 
     /// The color for this run
     pub color: Hsla,
+
+    /// The paint-time glyph rendering path.
+    pub glyph_render_mode: GlyphRenderMode,
+
+    /// Paint-only optical emboldening for MSDF glyphs.
+    pub text_embolden: Pixels,
 
     /// The background color for this run
     pub background_color: Option<Hsla>,
@@ -160,6 +166,8 @@ impl ShapedLine {
                 left_decorations.push(DecorationRun {
                     len: left_len,
                     color: decoration.color,
+                    glyph_render_mode: decoration.glyph_render_mode,
+                    text_embolden: decoration.text_embolden,
                     background_color: decoration.background_color,
                     underline: decoration.underline,
                     strikethrough: decoration.strikethrough,
@@ -167,6 +175,8 @@ impl ShapedLine {
                 right_decorations.push(DecorationRun {
                     len: right_len,
                     color: decoration.color,
+                    glyph_render_mode: decoration.glyph_render_mode,
+                    text_embolden: decoration.text_embolden,
                     background_color: decoration.background_color,
                     underline: decoration.underline,
                     strikethrough: decoration.strikethrough,
@@ -366,6 +376,8 @@ fn paint_line(
         let mut wraps = wrap_boundaries.iter().peekable();
         let mut run_end = 0;
         let mut color = black();
+        let mut glyph_render_mode = GlyphRenderMode::PlatformRaster;
+        let mut text_embolden = px(0.0);
         let mut current_underline: Option<(Point<Pixels>, UnderlineStyle)> = None;
         let mut current_strikethrough: Option<(Point<Pixels>, StrikethroughStyle)> = None;
         let text_system = cx.text_system().clone();
@@ -495,6 +507,8 @@ fn paint_line(
 
                         run_end += style_run.len as usize;
                         color = style_run.color;
+                        glyph_render_mode = style_run.glyph_render_mode;
+                        text_embolden = style_run.text_embolden;
                     } else {
                         run_end = layout.len;
                         finished_underline = current_underline.take();
@@ -542,12 +556,14 @@ fn paint_line(
                             layout.font_size,
                         )?;
                     } else {
-                        window.paint_glyph(
+                        window.paint_glyph_with_rendering(
                             glyph_origin + baseline_offset + vertical_offset,
                             run.font_id,
                             glyph.id,
                             layout.font_size,
                             color,
+                            glyph_render_mode,
+                            text_embolden,
                         )?;
                     }
                 }
@@ -985,6 +1001,8 @@ mod tests {
                 DecorationRun {
                     len: 2,
                     color: red,
+                    glyph_render_mode: GlyphRenderMode::PlatformRaster,
+                    text_embolden: px(0.0),
                     background_color: None,
                     underline: None,
                     strikethrough: None,
@@ -992,6 +1010,8 @@ mod tests {
                 DecorationRun {
                     len: 3,
                     color: green,
+                    glyph_render_mode: GlyphRenderMode::PlatformRaster,
+                    text_embolden: px(0.0),
                     background_color: None,
                     underline: None,
                     strikethrough: None,
@@ -999,6 +1019,8 @@ mod tests {
                 DecorationRun {
                     len: 1,
                     color: blue,
+                    glyph_render_mode: GlyphRenderMode::PlatformRaster,
+                    text_embolden: px(0.0),
                     background_color: None,
                     underline: None,
                     strikethrough: None,

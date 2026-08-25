@@ -133,6 +133,7 @@ struct WgpuPipelines {
     paths: wgpu::RenderPipeline,
     underlines: wgpu::RenderPipeline,
     mono_sprites: wgpu::RenderPipeline,
+    msdf_sprites: wgpu::RenderPipeline,
     subpixel_sprites: Option<wgpu::RenderPipeline>,
     poly_sprites: wgpu::RenderPipeline,
     #[allow(dead_code)]
@@ -156,6 +157,7 @@ struct InstanceBindings {
     shadows: InstanceBinding,
     underlines: InstanceBinding,
     monochrome_sprites: InstanceBinding,
+    msdf_sprites: InstanceBinding,
     subpixel_sprites: InstanceBinding,
     polychrome_sprites: InstanceBinding,
 }
@@ -1147,6 +1149,19 @@ impl WgpuRenderer {
             &shader_module,
         );
 
+        let msdf_sprites = create_pipeline(
+            "msdf_sprites",
+            "vs_msdf_sprite",
+            "fs_msdf_sprite",
+            &layouts.globals,
+            &layouts.instances,
+            Some(&layouts.texture),
+            wgpu::PrimitiveTopology::TriangleStrip,
+            &[Some(color_target.clone())],
+            1,
+            &shader_module,
+        );
+
         let subpixel_sprites = if let Some(subpixel_module) = &subpixel_shader_module {
             let subpixel_blend = wgpu::BlendState {
                 color: wgpu::BlendComponent {
@@ -1219,6 +1234,7 @@ impl WgpuRenderer {
             paths,
             underlines,
             mono_sprites,
+            msdf_sprites,
             subpixel_sprites,
             poly_sprites,
             surfaces,
@@ -1877,12 +1893,13 @@ impl WgpuRenderer {
             .write_instances(scene, &mut instance_offset)
             .with_context(|| {
                 format!(
-                    "scene too large: {} paths, {} shadows, {} quads, {} underlines, {} monochrome sprites, {} subpixel sprites, {} polychrome sprites",
+                    "scene too large: {} paths, {} shadows, {} quads, {} underlines, {} monochrome sprites, {} MSDF sprites, {} subpixel sprites, {} polychrome sprites",
                     scene.paths.len(),
                     scene.shadows.len(),
                     scene.quads.len(),
                     scene.underlines.len(),
                     scene.monochrome_sprites.len(),
+                    scene.msdf_sprites.len(),
                     scene.subpixel_sprites.len(),
                     scene.polychrome_sprites.len(),
                 )
@@ -2086,6 +2103,13 @@ impl WgpuRenderer {
                         instance_range(range),
                         &mut pass,
                     ),
+                    PrimitiveBatch::MsdfSprites { texture_id, range } => self.draw_sprites(
+                        &instance_bindings.msdf_sprites,
+                        texture_id,
+                        &self.resources().pipelines.msdf_sprites,
+                        instance_range(range),
+                        &mut pass,
+                    ),
                     PrimitiveBatch::SubpixelSprites { texture_id, range } => {
                         let resources = self.resources();
                         self.draw_sprites(
@@ -2245,6 +2269,11 @@ impl WgpuRenderer {
                 "monochrome_sprites_bind_group",
                 instance_offset,
                 &scene.monochrome_sprites,
+            )?,
+            msdf_sprites: self.write_instance_binding(
+                "msdf_sprites_bind_group",
+                instance_offset,
+                &scene.msdf_sprites,
             )?,
             subpixel_sprites: self.write_instance_binding(
                 "subpixel_sprites_bind_group",
@@ -2912,7 +2941,9 @@ impl RenderingParameters {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{MonochromeSprite, PolychromeSprite, Quad, Shadow, SubpixelSprite, Underline};
+    use gpui::{
+        MonochromeSprite, MsdfSprite, PolychromeSprite, Quad, Shadow, SubpixelSprite, Underline,
+    };
 
     #[test]
     fn webgl_shader_is_valid_wgsl_without_storage_buffers() {
@@ -2948,6 +2979,11 @@ mod tests {
         assert_eq!(std::mem::size_of::<PathSprite>(), 4 * 4);
         assert_eq!(std::mem::size_of::<Underline>(), 16 * 4);
         assert_eq!(std::mem::size_of::<MonochromeSprite>(), 28 * 4);
+        assert_eq!(std::mem::size_of::<MsdfSprite>(), 32 * 4);
+        assert_eq!(std::mem::align_of::<MsdfSprite>(), 4);
+        assert_eq!(std::mem::offset_of!(MsdfSprite, distance_scale), 28 * 4);
+        assert_eq!(std::mem::offset_of!(MsdfSprite, embolden), 29 * 4);
+        assert_eq!(std::mem::offset_of!(MsdfSprite, abi_padding), 30 * 4);
         assert_eq!(std::mem::size_of::<SubpixelSprite>(), 28 * 4);
         assert_eq!(std::mem::size_of::<PolychromeSprite>(), 24 * 4);
         assert_eq!(std::mem::size_of::<MaskParams>(), 16 * 4);

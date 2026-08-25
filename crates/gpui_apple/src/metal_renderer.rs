@@ -923,6 +923,9 @@ impl MetalRenderer {
                     viewport_size,
                     command_encoder,
                 ),
+                PrimitiveBatch::MsdfSprites { .. } => {
+                    unreachable!("Metal text backend falls back before scene insertion")
+                }
                 PrimitiveBatch::SubpixelSprites { .. } => unreachable!(),
             }
         }

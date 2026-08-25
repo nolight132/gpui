@@ -107,6 +107,7 @@ impl PlatformAtlas for DirectXAtlas {
             AtlasTextureKind::Monochrome => &mut lock.monochrome_textures,
             AtlasTextureKind::Polychrome => &mut lock.polychrome_textures,
             AtlasTextureKind::Subpixel => &mut lock.subpixel_textures,
+            AtlasTextureKind::Msdf => &mut lock.polychrome_textures,
         };
 
         let Some(texture_slot) = textures.textures.get_mut(id.index as usize) else {
@@ -136,6 +137,7 @@ impl DirectXAtlasState {
                 AtlasTextureKind::Monochrome => &mut self.monochrome_textures,
                 AtlasTextureKind::Polychrome => &mut self.polychrome_textures,
                 AtlasTextureKind::Subpixel => &mut self.subpixel_textures,
+                AtlasTextureKind::Msdf => &mut self.polychrome_textures,
             };
 
             if let Some(tile) = textures
@@ -186,6 +188,11 @@ impl DirectXAtlasState {
                 bind_flag = D3D11_BIND_SHADER_RESOURCE;
                 bytes_per_pixel = 4;
             }
+            AtlasTextureKind::Msdf => {
+                pixel_format = DXGI_FORMAT_R8G8B8A8_UNORM;
+                bind_flag = D3D11_BIND_SHADER_RESOURCE;
+                bytes_per_pixel = 4;
+            }
         }
         let texture_desc = D3D11_TEXTURE2D_DESC {
             Width: size.width.0 as u32,
@@ -216,6 +223,7 @@ impl DirectXAtlasState {
             AtlasTextureKind::Monochrome => &mut self.monochrome_textures,
             AtlasTextureKind::Polychrome => &mut self.polychrome_textures,
             AtlasTextureKind::Subpixel => &mut self.subpixel_textures,
+            AtlasTextureKind::Msdf => &mut self.polychrome_textures,
         };
         let index = texture_list.free_list.pop();
         let view = unsafe {
@@ -256,6 +264,9 @@ impl DirectXAtlasState {
             AtlasTextureKind::Subpixel => {
                 &self.subpixel_textures[id.index as usize].as_ref().unwrap()
             }
+            AtlasTextureKind::Msdf => &self.polychrome_textures[id.index as usize]
+                .as_ref()
+                .unwrap(),
         }
     }
 }

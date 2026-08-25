@@ -70,6 +70,7 @@ impl PlatformAtlas for MetalAtlas {
             AtlasTextureKind::Monochrome => &mut lock.monochrome_textures,
             AtlasTextureKind::Polychrome => &mut lock.polychrome_textures,
             AtlasTextureKind::Subpixel => unreachable!(),
+            AtlasTextureKind::Msdf => unreachable!("Metal text backend falls back before atlas"),
         };
 
         let Some(texture_slot) = textures
@@ -103,6 +104,9 @@ impl MetalAtlasState {
                 AtlasTextureKind::Monochrome => &mut self.monochrome_textures,
                 AtlasTextureKind::Polychrome => &mut self.polychrome_textures,
                 AtlasTextureKind::Subpixel => unreachable!(),
+                AtlasTextureKind::Msdf => {
+                    unreachable!("Metal text backend falls back before atlas")
+                }
             };
 
             if let Some(tile) = textures
@@ -148,6 +152,7 @@ impl MetalAtlasState {
                 usage = metal::MTLTextureUsage::ShaderRead;
             }
             AtlasTextureKind::Subpixel => unreachable!(),
+            AtlasTextureKind::Msdf => unreachable!("Metal text backend falls back before atlas"),
         }
         texture_descriptor.set_pixel_format(pixel_format);
         texture_descriptor.set_usage(usage);
@@ -164,6 +169,7 @@ impl MetalAtlasState {
             AtlasTextureKind::Monochrome => &mut self.monochrome_textures,
             AtlasTextureKind::Polychrome => &mut self.polychrome_textures,
             AtlasTextureKind::Subpixel => unreachable!(),
+            AtlasTextureKind::Msdf => unreachable!("Metal text backend falls back before atlas"),
         };
 
         let index = texture_list.free_list.pop();

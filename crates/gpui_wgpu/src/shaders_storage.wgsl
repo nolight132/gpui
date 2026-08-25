@@ -11,6 +11,7 @@
 @group(1) @binding(0) var<storage, read> b_path_sprites: array<PathSprite>;
 @group(1) @binding(0) var<storage, read> b_underlines: array<Underline>;
 @group(1) @binding(0) var<storage, read> b_mono_sprites: array<MonochromeSprite>;
+@group(1) @binding(0) var<storage, read> b_msdf_sprites: array<MsdfSprite>;
 @group(1) @binding(0) var<storage, read> b_poly_sprites: array<PolychromeSprite>;
 @group(1) @binding(0) var<storage, read> b_backdrops: array<Backdrop>;
 @group(1) @binding(0) var<storage, read> b_blurs: array<Blur>;
@@ -38,6 +39,10 @@ fn load_underline(instance_id: u32) -> Underline {
 
 fn load_mono_sprite(instance_id: u32) -> MonochromeSprite {
     return b_mono_sprites[instance_id];
+}
+
+fn load_msdf_sprite(instance_id: u32) -> MsdfSprite {
+    return b_msdf_sprites[instance_id];
 }
 
 fn load_poly_sprite(instance_id: u32) -> PolychromeSprite {

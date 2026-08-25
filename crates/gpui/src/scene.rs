@@ -50,6 +50,7 @@ pub struct Scene {
     pub paths: Vec<Path<ScaledPixels>>,
     pub underlines: Vec<Underline>,
     pub monochrome_sprites: Vec<MonochromeSprite>,
+    pub msdf_sprites: Vec<MsdfSprite>,
     pub subpixel_sprites: Vec<SubpixelSprite>,
     pub polychrome_sprites: Vec<PolychromeSprite>,
     pub surfaces: Vec<PaintSurface>,
@@ -69,6 +70,7 @@ impl Scene {
         self.quads.clear();
         self.underlines.clear();
         self.monochrome_sprites.clear();
+        self.msdf_sprites.clear();
         self.subpixel_sprites.clear();
         self.polychrome_sprites.clear();
         self.surfaces.clear();
@@ -141,6 +143,7 @@ impl Scene {
             PrimitiveBatch::MonochromeSprites { range, .. } => {
                 self.monochrome_sprites[range.start].order
             }
+            PrimitiveBatch::MsdfSprites { range, .. } => self.msdf_sprites[range.start].order,
             PrimitiveBatch::SubpixelSprites { range, .. } => {
                 self.subpixel_sprites[range.start].order
             }
@@ -215,6 +218,10 @@ impl Scene {
                 sprite.order = order;
                 self.monochrome_sprites.push(*sprite);
             }
+            Primitive::MsdfSprite(sprite) => {
+                sprite.order = order;
+                self.msdf_sprites.push(*sprite);
+            }
             Primitive::SubpixelSprite(sprite) => {
                 sprite.order = order;
                 self.subpixel_sprites.push(*sprite);
@@ -259,6 +266,8 @@ impl Scene {
         self.underlines.sort_by_key(|underline| underline.order);
         self.monochrome_sprites
             .sort_by_key(|sprite| (sprite.order, sprite.tile.tile_id));
+        self.msdf_sprites
+            .sort_by_key(|sprite| (sprite.order, sprite.tile.tile_id));
         self.subpixel_sprites
             .sort_by_key(|sprite| (sprite.order, sprite.tile.tile_id));
         self.polychrome_sprites
@@ -299,6 +308,8 @@ impl Scene {
             underlines_iter: self.underlines.iter().peekable(),
             monochrome_sprites_start: 0,
             monochrome_sprites_iter: self.monochrome_sprites.iter().peekable(),
+            msdf_sprites_start: 0,
+            msdf_sprites_iter: self.msdf_sprites.iter().peekable(),
             subpixel_sprites_start: 0,
             subpixel_sprites_iter: self.subpixel_sprites.iter().peekable(),
             polychrome_sprites_start: 0,
@@ -325,6 +336,7 @@ pub(crate) enum PrimitiveKind {
     Path,
     Underline,
     MonochromeSprite,
+    MsdfSprite,
     SubpixelSprite,
     PolychromeSprite,
     Surface,
@@ -646,6 +658,7 @@ pub enum Primitive {
     Path(Path<ScaledPixels>),
     Underline(Underline),
     MonochromeSprite(MonochromeSprite),
+    MsdfSprite(MsdfSprite),
     SubpixelSprite(SubpixelSprite),
     PolychromeSprite(PolychromeSprite),
     Surface(PaintSurface),
@@ -661,6 +674,7 @@ impl Primitive {
             Primitive::Path(path) => &path.bounds,
             Primitive::Underline(underline) => &underline.bounds,
             Primitive::MonochromeSprite(sprite) => &sprite.bounds,
+            Primitive::MsdfSprite(sprite) => &sprite.bounds,
             Primitive::SubpixelSprite(sprite) => &sprite.bounds,
             Primitive::PolychromeSprite(sprite) => &sprite.bounds,
             Primitive::Surface(surface) => &surface.bounds,
@@ -675,6 +689,7 @@ impl Primitive {
             Primitive::Path(path) => &path.content_mask,
             Primitive::Underline(underline) => &underline.content_mask,
             Primitive::MonochromeSprite(sprite) => &sprite.content_mask,
+            Primitive::MsdfSprite(sprite) => &sprite.content_mask,
             Primitive::SubpixelSprite(sprite) => &sprite.content_mask,
             Primitive::PolychromeSprite(sprite) => &sprite.content_mask,
             Primitive::Surface(surface) => &surface.content_mask,
@@ -704,6 +719,8 @@ struct BatchIterator<'a> {
     underlines_iter: Peekable<slice::Iter<'a, Underline>>,
     monochrome_sprites_start: usize,
     monochrome_sprites_iter: Peekable<slice::Iter<'a, MonochromeSprite>>,
+    msdf_sprites_start: usize,
+    msdf_sprites_iter: Peekable<slice::Iter<'a, MsdfSprite>>,
     subpixel_sprites_start: usize,
     subpixel_sprites_iter: Peekable<slice::Iter<'a, SubpixelSprite>>,
     polychrome_sprites_start: usize,
@@ -734,6 +751,10 @@ impl<'a> Iterator for BatchIterator<'a> {
             (
                 self.monochrome_sprites_iter.peek().map(|s| s.order),
                 PrimitiveKind::MonochromeSprite,
+            ),
+            (
+                self.msdf_sprites_iter.peek().map(|s| s.order),
+                PrimitiveKind::MsdfSprite,
             ),
             (
                 self.subpixel_sprites_iter.peek().map(|s| s.order),
@@ -858,6 +879,27 @@ impl<'a> Iterator for BatchIterator<'a> {
                     range: sprites_start..sprites_end,
                 })
             }
+            PrimitiveKind::MsdfSprite => {
+                let texture_id = self.msdf_sprites_iter.peek().unwrap().tile.texture_id;
+                let sprites_start = self.msdf_sprites_start;
+                let mut sprites_end = sprites_start + 1;
+                self.msdf_sprites_iter.next();
+                while self
+                    .msdf_sprites_iter
+                    .next_if(|sprite| {
+                        (sprite.order, batch_kind) < max_order_and_kind
+                            && sprite.tile.texture_id == texture_id
+                    })
+                    .is_some()
+                {
+                    sprites_end += 1;
+                }
+                self.msdf_sprites_start = sprites_end;
+                Some(PrimitiveBatch::MsdfSprites {
+                    texture_id,
+                    range: sprites_start..sprites_end,
+                })
+            }
             PrimitiveKind::SubpixelSprite => {
                 let texture_id = self.subpixel_sprites_iter.peek().unwrap().tile.texture_id;
                 let sprites_start = self.subpixel_sprites_start;
@@ -937,6 +979,10 @@ pub enum PrimitiveBatch {
         texture_id: AtlasTextureId,
         range: Range<usize>,
     },
+    MsdfSprites {
+        texture_id: AtlasTextureId,
+        range: Range<usize>,
+    },
     #[cfg_attr(target_os = "macos", allow(dead_code))]
     SubpixelSprites {
         texture_id: AtlasTextureId,
@@ -961,6 +1007,13 @@ impl PrimitiveBatch {
             Self::MonochromeSprites { texture_id, range } => {
                 format!(
                     "monochrome sprites ({}) on atlas {}",
+                    range.len(),
+                    texture_id.index
+                )
+            }
+            Self::MsdfSprites { texture_id, range } => {
+                format!(
+                    "MSDF sprites ({}) on atlas {}",
                     range.len(),
                     texture_id.index
                 )
@@ -1192,6 +1245,32 @@ pub struct MonochromeSprite {
     pub color: Hsla,
     pub tile: AtlasTile,
     pub transformation: TransformationMatrix,
+}
+
+/// A glyph backed by an RGBA MTSDF atlas tile.
+///
+/// The field is decoded in linear space. `distance_scale` converts its em-normalized signed
+/// distance to device pixels, while `embolden` moves the zero contour without changing layout.
+#[derive(Copy, Clone, Debug)]
+#[repr(C)]
+#[expect(missing_docs)]
+pub struct MsdfSprite {
+    pub order: DrawOrder,
+    pub pad: u32,
+    pub bounds: Bounds<ScaledPixels>,
+    pub content_mask: ContentMask<ScaledPixels>,
+    pub color: Hsla,
+    pub tile: AtlasTile,
+    pub transformation: TransformationMatrix,
+    pub distance_scale: f32,
+    pub embolden: f32,
+    pub abi_padding: [u32; 2],
+}
+
+impl From<MsdfSprite> for Primitive {
+    fn from(sprite: MsdfSprite) -> Self {
+        Primitive::MsdfSprite(sprite)
+    }
 }
 
 impl From<MonochromeSprite> for Primitive {

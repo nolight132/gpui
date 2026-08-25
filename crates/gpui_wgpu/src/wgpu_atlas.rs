@@ -196,6 +196,8 @@ impl WgpuAtlasState {
         let format = match kind {
             AtlasTextureKind::Monochrome => wgpu::TextureFormat::R8Unorm,
             AtlasTextureKind::Subpixel | AtlasTextureKind::Polychrome => self.color_texture_format,
+            // MTSDF channels are semantic data, always stored as linear RGBA without BGRA swizzle.
+            AtlasTextureKind::Msdf => wgpu::TextureFormat::Rgba8Unorm,
         };
 
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
@@ -251,7 +253,7 @@ impl WgpuAtlasState {
         let data = self
             .storage
             .get(id)
-            .map(|texture| swizzle_upload_data(bytes, texture.format))
+            .map(|texture| swizzle_upload_data(bytes, texture.format, id.kind))
             .unwrap_or_else(|| bytes.to_vec());
 
         self.pending_uploads
@@ -297,6 +299,7 @@ struct WgpuAtlasStorage {
     monochrome_textures: AtlasTextureList<WgpuAtlasTexture>,
     subpixel_textures: AtlasTextureList<WgpuAtlasTexture>,
     polychrome_textures: AtlasTextureList<WgpuAtlasTexture>,
+    msdf_textures: AtlasTextureList<WgpuAtlasTexture>,
 }
 
 impl ops::Index<AtlasTextureKind> for WgpuAtlasStorage {
@@ -306,6 +309,7 @@ impl ops::Index<AtlasTextureKind> for WgpuAtlasStorage {
             AtlasTextureKind::Monochrome => &self.monochrome_textures,
             AtlasTextureKind::Subpixel => &self.subpixel_textures,
             AtlasTextureKind::Polychrome => &self.polychrome_textures,
+            AtlasTextureKind::Msdf => &self.msdf_textures,
         }
     }
 }
@@ -316,6 +320,7 @@ impl ops::IndexMut<AtlasTextureKind> for WgpuAtlasStorage {
             AtlasTextureKind::Monochrome => &mut self.monochrome_textures,
             AtlasTextureKind::Subpixel => &mut self.subpixel_textures,
             AtlasTextureKind::Polychrome => &mut self.polychrome_textures,
+            AtlasTextureKind::Msdf => &mut self.msdf_textures,
         }
     }
 }
@@ -336,6 +341,7 @@ impl ops::Index<AtlasTextureId> for WgpuAtlasStorage {
             AtlasTextureKind::Monochrome => &self.monochrome_textures,
             AtlasTextureKind::Subpixel => &self.subpixel_textures,
             AtlasTextureKind::Polychrome => &self.polychrome_textures,
+            AtlasTextureKind::Msdf => &self.msdf_textures,
         };
         textures[id.index as usize]
             .as_ref()
@@ -385,7 +391,14 @@ impl WgpuAtlasTexture {
     }
 }
 
-fn swizzle_upload_data(bytes: &[u8], format: wgpu::TextureFormat) -> Vec<u8> {
+fn swizzle_upload_data(
+    bytes: &[u8],
+    format: wgpu::TextureFormat,
+    kind: AtlasTextureKind,
+) -> Vec<u8> {
+    if kind == AtlasTextureKind::Msdf {
+        return bytes.to_vec();
+    }
     match format {
         wgpu::TextureFormat::Rgba8Unorm => {
             let mut data = bytes.to_vec();
@@ -402,7 +415,7 @@ fn swizzle_upload_data(bytes: &[u8], format: wgpu::TextureFormat) -> Vec<u8> {
 mod tests {
     use super::*;
     use gpui::block_on;
-    use gpui::{ImageId, RenderImageParams};
+    use gpui::{FontId, GlyphId, ImageId, MsdfGlyphParams, RenderImageParams};
     use std::sync::Arc;
 
     fn test_device_and_queue() -> anyhow::Result<(Arc<wgpu::Device>, Arc<wgpu::Queue>)> {
@@ -511,7 +524,11 @@ mod tests {
     fn swizzle_upload_data_preserves_bgra_uploads() {
         let input = vec![0x10, 0x20, 0x30, 0x40];
         assert_eq!(
-            swizzle_upload_data(&input, wgpu::TextureFormat::Bgra8Unorm),
+            swizzle_upload_data(
+                &input,
+                wgpu::TextureFormat::Bgra8Unorm,
+                AtlasTextureKind::Polychrome,
+            ),
             input
         );
     }
@@ -520,8 +537,54 @@ mod tests {
     fn swizzle_upload_data_converts_bgra_to_rgba() {
         let input = vec![0x10, 0x20, 0x30, 0x40, 0xAA, 0xBB, 0xCC, 0xDD];
         assert_eq!(
-            swizzle_upload_data(&input, wgpu::TextureFormat::Rgba8Unorm),
+            swizzle_upload_data(
+                &input,
+                wgpu::TextureFormat::Rgba8Unorm,
+                AtlasTextureKind::Polychrome,
+            ),
             vec![0x30, 0x20, 0x10, 0x40, 0xCC, 0xBB, 0xAA, 0xDD]
         );
+    }
+
+    #[test]
+    fn swizzle_upload_data_preserves_msdf_channels() {
+        let input = vec![0x10, 0x20, 0x30, 0x40];
+        assert_eq!(
+            swizzle_upload_data(
+                &input,
+                wgpu::TextureFormat::Rgba8Unorm,
+                AtlasTextureKind::Msdf,
+            ),
+            input
+        );
+    }
+
+    #[test]
+    fn animated_msdf_style_reuses_one_atlas_tile() -> anyhow::Result<()> {
+        let (device, queue) = test_device_and_queue()?;
+        let atlas = WgpuAtlas::new(device, queue, wgpu::TextureFormat::Bgra8Unorm);
+        let key = AtlasKey::MsdfGlyph(MsdfGlyphParams::new(FontId(7), GlyphId(42)));
+        let field_size = Size {
+            width: DevicePixels(1),
+            height: DevicePixels(1),
+        };
+        let mut build_count = 0;
+        let mut first_tile = None;
+
+        // Font size, color, scale, and embolden change in the sprite only; ten thousand simulated
+        // paint frames therefore query the exact same field identity.
+        for _frame in 0..10_000 {
+            let tile = atlas
+                .get_or_insert_with(&key, &mut || {
+                    build_count += 1;
+                    Ok(Some((field_size, Cow::Borrowed(&[0x10, 0x20, 0x30, 0x40]))))
+                })?
+                .expect("test callback always builds a tile");
+            assert_eq!(tile.texture_id.kind, AtlasTextureKind::Msdf);
+            assert_eq!(*first_tile.get_or_insert(tile), tile);
+        }
+
+        assert_eq!(build_count, 1);
+        Ok(())
     }
 }

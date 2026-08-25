@@ -897,6 +897,9 @@ impl DirectXRenderer {
                 PrimitiveBatch::MonochromeSprites { texture_id, range } => {
                     self.draw_monochrome_sprites(texture_id, range.start, range.len())
                 }
+                PrimitiveBatch::MsdfSprites { .. } => {
+                    debug_assert!(false, "DirectWrite text must fall back before MSDF batching");
+                }
                 PrimitiveBatch::SubpixelSprites { texture_id, range } => {
                     self.draw_subpixel_sprites(texture_id, range.start, range.len())
                 }

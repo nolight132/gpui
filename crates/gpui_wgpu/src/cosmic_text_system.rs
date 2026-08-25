@@ -1,4 +1,13 @@
 use anyhow::{Context as _, Ok, Result};
+use bymsdfgen_core::{
+    Bitmap as MsdfBitmap, Contour as MsdfContour, DistanceMapping, EdgeSegment as MsdfEdgeSegment,
+    ErrorCorrectionMode, FillRule, MsdfGeneratorConfig, Projection as MsdfProjection,
+    Range as MsdfRange, SdfTransformation, Shape as MsdfShape, Vector2 as MsdfVector,
+    coloring::edge_coloring_simple,
+    correction::msdf_error_correction,
+    generator::{DistanceCheckMode, generate_mtsdf as generate_bymtsdf},
+    raster::distance_sign_correction_multi,
+};
 use collections::HashMap;
 use cosmic_text::{
     Attrs, AttrsList, Ellipsize, Family, Font as CosmicTextFont,
@@ -6,9 +15,9 @@ use cosmic_text::{
 };
 use gpui::{
     Bounds, DevicePixels, Font, FontFallbacks, FontFeatures, FontId, FontMetrics, FontRun, GlyphId,
-    LineLayout, Pixels, PlatformTextSystem, RenderGlyphParams, SUBPIXEL_VARIANTS_X,
-    SUBPIXEL_VARIANTS_Y, ShapedGlyph, ShapedRun, SharedString, Size, TextRenderingMode, point,
-    size,
+    LineLayout, MsdfGlyphInfo, MsdfGlyphParams, Pixels, PlatformTextSystem, RenderGlyphParams,
+    SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ShapedGlyph, ShapedRun, SharedString, Size,
+    TextRenderingMode, point, size,
 };
 
 use itertools::Itertools;
@@ -186,6 +195,22 @@ impl PlatformTextSystem for CosmicTextSystem {
         raster_bounds: Bounds<DevicePixels>,
     ) -> Result<(Size<DevicePixels>, Vec<u8>)> {
         self.0.write().rasterize_glyph(params, raster_bounds)
+    }
+
+    fn supports_msdf(&self) -> bool {
+        true
+    }
+
+    fn msdf_glyph_info(&self, params: &MsdfGlyphParams) -> Result<Option<MsdfGlyphInfo>> {
+        self.0.write().msdf_glyph_info(params)
+    }
+
+    fn rasterize_msdf_glyph(
+        &self,
+        params: &MsdfGlyphParams,
+        info: MsdfGlyphInfo,
+    ) -> Result<Option<Vec<u8>>> {
+        self.0.write().rasterize_msdf_glyph(params, info)
     }
 
     fn layout_line(&self, text: &str, font_size: Pixels, runs: &[FontRun]) -> LineLayout {
@@ -476,6 +501,90 @@ impl CosmicTextSystemState {
         renderer
             .render(&mut scaler, glyph_id)
             .with_context(|| format!("unable to render glyph via swash for {params:?}"))
+    }
+
+    fn msdf_glyph_info(&mut self, params: &MsdfGlyphParams) -> Result<Option<MsdfGlyphInfo>> {
+        let Some(outline) = self.msdf_outline(params)? else {
+            return Ok(None);
+        };
+        let region = msdf_region(&outline, params);
+        // The shader maps the quad to the outermost texel centers (rather than allocation edges)
+        // to prevent filtering across neighbouring atlas tiles. Match those sample coordinates in
+        // paint geometry and in the maximum safe contour displacement.
+        let padding_x_em = outline.width_em() as f32 * (region.padding_x as f32 - 0.5).max(0.0)
+            / region.inner_width as f32;
+        let padding_y_em = outline.height_em() as f32 * (region.padding_y as f32 - 0.5).max(0.0)
+            / region.inner_height as f32;
+        let bounds_em = Bounds {
+            origin: point(
+                outline.min_x_em() as f32 - padding_x_em,
+                -(outline.min_y_em() + outline.height_em()) as f32 - padding_y_em,
+            ),
+            size: size(
+                outline.width_em() as f32 + 2.0 * padding_x_em,
+                outline.height_em() as f32 + 2.0 * padding_y_em,
+            ),
+        };
+        let raster_size = size(
+            DevicePixels(region.total_width().try_into()?),
+            DevicePixels(region.total_height().try_into()?),
+        );
+
+        Ok(Some(MsdfGlyphInfo {
+            bounds_em,
+            raster_size,
+            field_padding_em: padding_x_em.min(padding_y_em),
+        }))
+    }
+
+    #[profiling::function]
+    fn rasterize_msdf_glyph(
+        &mut self,
+        params: &MsdfGlyphParams,
+        info: MsdfGlyphInfo,
+    ) -> Result<Option<Vec<u8>>> {
+        let Some(outline) = self.msdf_outline(params)? else {
+            return Ok(None);
+        };
+        let region = msdf_region(&outline, params);
+        let actual_size = size(
+            DevicePixels(region.total_width().try_into()?),
+            DevicePixels(region.total_height().try_into()?),
+        );
+        anyhow::ensure!(
+            actual_size == info.raster_size,
+            "MTSDF geometry changed between bounds and atlas generation"
+        );
+        let bytes = generate_mtsdf(&outline, region);
+        if !mtsdf_has_closed_exterior(&bytes, region.total_width(), region.total_height()) {
+            // Edge coloring is undefined for a few pathological/self-intersecting outlines. A
+            // zero contour reaching the padded tile edge would become a visible ray after linear
+            // filtering, so reject that field and use the platform rasterizer for this glyph.
+            return Ok(None);
+        }
+        Ok(Some(bytes))
+    }
+
+    fn msdf_outline(&self, params: &MsdfGlyphParams) -> Result<Option<BymsdfOutline>> {
+        let loaded_font = self
+            .loaded_fonts
+            .get(params.font_id.0)
+            .context("MSDF font id is not loaded")?;
+        let font = cosmic_text::skrifa::FontRef::from_index(
+            loaded_font.font.data(),
+            self.font_system
+                .db()
+                .face(loaded_font.font.id())
+                .context("MSDF font face is missing from font database")?
+                .index,
+        )
+        .context("unable to parse font for MTSDF generation")?;
+        let location = skrifa_location(&loaded_font.variation_coords);
+        read_msdf_outline(
+            font,
+            cosmic_text::skrifa::GlyphId::new(params.glyph_id.0),
+            &location,
+        )
     }
 
     /// This is used when cosmic_text has chosen a fallback font instead of using the requested
@@ -814,6 +923,301 @@ impl CosmicTextSystemState {
             runs,
             len: text.len(),
         }
+    }
+}
+
+fn skrifa_location(
+    coordinates: &[swash::NormalizedCoord],
+) -> SmallVec<[cosmic_text::skrifa::prelude::NormalizedCoord; 4]> {
+    coordinates
+        .iter()
+        .map(|coordinate| {
+            cosmic_text::skrifa::prelude::NormalizedCoord::from_f32(
+                f32::from(*coordinate) / 16384.0,
+            )
+        })
+        .collect()
+}
+
+#[derive(Clone, Copy)]
+struct MsdfRegion {
+    inner_width: usize,
+    inner_height: usize,
+    padding_x: usize,
+    padding_y: usize,
+}
+
+impl MsdfRegion {
+    fn total_width(self) -> usize {
+        self.inner_width + 2 * self.padding_x
+    }
+
+    fn total_height(self) -> usize {
+        self.inner_height + 2 * self.padding_y
+    }
+}
+
+struct BymsdfOutline {
+    shape: MsdfShape,
+    bounds: bymsdfgen_core::Bounds,
+    units_per_em: f64,
+}
+
+impl BymsdfOutline {
+    fn width_em(&self) -> f64 {
+        (self.bounds.r - self.bounds.l) / self.units_per_em
+    }
+
+    fn height_em(&self) -> f64 {
+        (self.bounds.t - self.bounds.b) / self.units_per_em
+    }
+
+    fn min_x_em(&self) -> f64 {
+        self.bounds.l / self.units_per_em
+    }
+
+    fn min_y_em(&self) -> f64 {
+        self.bounds.b / self.units_per_em
+    }
+}
+
+fn msdf_region(outline: &BymsdfOutline, params: &MsdfGlyphParams) -> MsdfRegion {
+    let pixels_per_em = f64::from(params.generation_em_pixels);
+    MsdfRegion {
+        inner_width: (outline.width_em() * pixels_per_em).ceil().max(1.0) as usize,
+        inner_height: (outline.height_em() * pixels_per_em).ceil().max(1.0) as usize,
+        padding_x: usize::from(params.padding_pixels),
+        padding_y: usize::from(params.padding_pixels),
+    }
+}
+
+fn generate_mtsdf(outline: &BymsdfOutline, region: MsdfRegion) -> Vec<u8> {
+    let shape_width = outline.bounds.r - outline.bounds.l;
+    let shape_height = outline.bounds.t - outline.bounds.b;
+    let scale = MsdfVector::new(
+        region.inner_width as f64 / shape_width,
+        region.inner_height as f64 / shape_height,
+    );
+    let translation = MsdfVector::new(
+        region.padding_x as f64 / scale.x - outline.bounds.l,
+        region.padding_y as f64 / scale.y - outline.bounds.b,
+    );
+    let transformation = SdfTransformation::new(
+        MsdfProjection::new(scale, translation),
+        // A width of one em maps the field to `0.5 + distance_in_em`, preserving the exact
+        // distance convention used by the shader and its paint-time scale.
+        DistanceMapping::from_range(MsdfRange::symmetric(outline.units_per_em)),
+    );
+
+    let mut config = MsdfGeneratorConfig::default();
+    config.error_correction.mode = ErrorCorrectionMode::Disabled;
+    let mut bitmap: MsdfBitmap<f32, 4> =
+        MsdfBitmap::new(region.total_width(), region.total_height());
+    generate_bymtsdf(&mut bitmap, &outline.shape, &transformation, &config);
+
+    // Make every channel agree with the actual non-zero winding fill before running the full
+    // interpolation-artifact correction. The expensive exact-distance mode runs only on an atlas
+    // miss and prevents optical embolden from revealing false contour rays.
+    distance_sign_correction_multi(
+        &mut bitmap,
+        &outline.shape,
+        &transformation.projection,
+        0.5,
+        FillRule::NonZero,
+    );
+    config.error_correction.mode = ErrorCorrectionMode::EdgePriority;
+    config.error_correction.distance_check_mode = DistanceCheckMode::AlwaysCheckDistance;
+    msdf_error_correction(&mut bitmap, &outline.shape, &transformation, &config);
+
+    let mut bytes = Vec::with_capacity(region.total_width() * region.total_height() * 4);
+    // bymsdfgen stores row zero at the bottom; GPUI atlas UVs start at the top.
+    for y in (0..region.total_height()).rev() {
+        for x in 0..region.total_width() {
+            bytes.extend(
+                bitmap
+                    .pixel(x, y)
+                    .iter()
+                    .map(|channel| (channel.clamp(0.0, 1.0) * 255.0).round() as u8),
+            );
+        }
+    }
+    bytes
+}
+
+fn mtsdf_has_closed_exterior(bytes: &[u8], width: usize, height: usize) -> bool {
+    if width < 2 || height < 2 || bytes.len() != width * height * 4 {
+        return false;
+    }
+
+    let is_outside = |x: usize, y: usize| {
+        let pixel = &bytes[(y * width + x) * 4..][..4];
+        let mut rgb = [pixel[0], pixel[1], pixel[2]];
+        rgb.sort_unstable();
+        rgb[1] < 128 && pixel[3] < 128
+    };
+
+    (0..width).all(|x| is_outside(x, 0) && is_outside(x, height - 1))
+        && (1..height - 1).all(|y| is_outside(0, y) && is_outside(width - 1, y))
+}
+
+fn read_msdf_outline(
+    font: cosmic_text::skrifa::FontRef<'_>,
+    glyph_id: cosmic_text::skrifa::GlyphId,
+    location: &[cosmic_text::skrifa::prelude::NormalizedCoord],
+) -> Result<Option<BymsdfOutline>> {
+    use cosmic_text::skrifa::{MetadataProvider, raw::TableProvider};
+
+    if let std::result::Result::Ok(colr) = font.colr()
+        && (colr
+            .v0_base_glyph(glyph_id)
+            .is_ok_and(|glyph| glyph.is_some())
+            || colr
+                .v1_base_glyph(glyph_id)
+                .is_ok_and(|glyph| glyph.is_some()))
+    {
+        return Ok(None);
+    }
+    if let std::result::Result::Ok(svg) = font.svg()
+        && svg.glyph_data(glyph_id).is_ok_and(|glyph| glyph.is_some())
+    {
+        return Ok(None);
+    }
+    if font
+        .bitmap_strikes()
+        .glyph_for_size(cosmic_text::skrifa::prelude::Size::unscaled(), glyph_id)
+        .is_some()
+    {
+        return Ok(None);
+    }
+
+    let location = cosmic_text::skrifa::prelude::LocationRef::new(location);
+    let outlines = font.outline_glyphs();
+    let (Some(glyph), Some(bound)) = (
+        outlines.get(glyph_id),
+        font.glyph_metrics(cosmic_text::skrifa::prelude::Size::unscaled(), location)
+            .bounds(glyph_id),
+    ) else {
+        return Ok(None);
+    };
+    let units_per_em = font
+        .metrics(cosmic_text::skrifa::prelude::Size::unscaled(), location)
+        .units_per_em as f64;
+    if units_per_em <= 0.0 || bound.x_min >= bound.x_max || bound.y_min >= bound.y_max {
+        return Ok(None);
+    }
+
+    let mut pen = BymsdfOutlinePen::default();
+    glyph
+        .draw(
+            cosmic_text::skrifa::outline::DrawSettings::unhinted(
+                cosmic_text::skrifa::prelude::Size::unscaled(),
+                location,
+            ),
+            &mut pen,
+        )
+        .context("unable to read outline for MTSDF generation")?;
+    let mut shape = pen.finish();
+    if shape.edge_count() == 0 || !shape.validate() {
+        return Ok(None);
+    }
+    shape.normalize();
+    shape.orient_contours();
+    edge_coloring_simple(&mut shape, 3.0, 0);
+    if !shape.validate() {
+        return Ok(None);
+    }
+
+    Ok(Some(BymsdfOutline {
+        shape,
+        bounds: bymsdfgen_core::Bounds {
+            l: bound.x_min as f64,
+            b: bound.y_min as f64,
+            r: bound.x_max as f64,
+            t: bound.y_max as f64,
+        },
+        units_per_em,
+    }))
+}
+
+#[derive(Default)]
+struct BymsdfOutlinePen {
+    shape: MsdfShape,
+    contour: Option<MsdfContour>,
+    start: Option<MsdfVector>,
+    current: Option<MsdfVector>,
+}
+
+impl BymsdfOutlinePen {
+    fn finish_contour(&mut self) {
+        let (Some(mut contour), Some(start), Some(current)) =
+            (self.contour.take(), self.start.take(), self.current.take())
+        else {
+            return;
+        };
+        if current != start {
+            contour.add_edge(MsdfEdgeSegment::line(current, start));
+        }
+        if !contour.is_empty() {
+            self.shape.add_contour(contour);
+        }
+    }
+
+    fn add_edge(&mut self, edge: MsdfEdgeSegment, to: MsdfVector) {
+        if let Some(contour) = &mut self.contour {
+            contour.add_edge(edge);
+            self.current = Some(to);
+        }
+    }
+
+    fn finish(mut self) -> MsdfShape {
+        self.finish_contour();
+        self.shape
+    }
+}
+
+impl cosmic_text::skrifa::outline::OutlinePen for BymsdfOutlinePen {
+    fn move_to(&mut self, x: f32, y: f32) {
+        self.finish_contour();
+        let point = MsdfVector::new(x as f64, y as f64);
+        self.contour = Some(MsdfContour::new());
+        self.start = Some(point);
+        self.current = Some(point);
+    }
+
+    fn line_to(&mut self, x: f32, y: f32) {
+        let Some(from) = self.current else {
+            self.move_to(x, y);
+            return;
+        };
+        let to = MsdfVector::new(x as f64, y as f64);
+        if from != to {
+            self.add_edge(MsdfEdgeSegment::line(from, to), to);
+        }
+    }
+
+    fn quad_to(&mut self, cx0: f32, cy0: f32, x: f32, y: f32) {
+        let Some(from) = self.current else {
+            self.move_to(x, y);
+            return;
+        };
+        let control = MsdfVector::new(cx0 as f64, cy0 as f64);
+        let to = MsdfVector::new(x as f64, y as f64);
+        self.add_edge(MsdfEdgeSegment::quadratic(from, control, to), to);
+    }
+
+    fn curve_to(&mut self, cx0: f32, cy0: f32, cx1: f32, cy1: f32, x: f32, y: f32) {
+        let Some(from) = self.current else {
+            self.move_to(x, y);
+            return;
+        };
+        let control_0 = MsdfVector::new(cx0 as f64, cy0 as f64);
+        let control_1 = MsdfVector::new(cx1 as f64, cy1 as f64);
+        let to = MsdfVector::new(x as f64, y as f64);
+        self.add_edge(MsdfEdgeSegment::cubic(from, control_0, control_1, to), to);
+    }
+
+    fn close(&mut self) {
+        self.finish_contour();
     }
 }
 
@@ -1217,6 +1621,86 @@ mod tests {
     }
 
     #[test]
+    fn mtsdf_generation_preserves_independent_channels() -> Result<()> {
+        let text_system = text_system()?;
+        let font_id = text_system.font_id(&gpui::font("IBM Plex Sans"))?;
+
+        for character in ['A', 'g', '@'] {
+            let glyph_id = text_system
+                .glyph_for_char(font_id, character)
+                .with_context(|| format!("IBM Plex Sans must contain {character}"))?;
+            let params = MsdfGlyphParams::new(font_id, glyph_id);
+            let info = text_system
+                .msdf_glyph_info(&params)?
+                .with_context(|| format!("{character} must have an outline"))?;
+            let bytes = text_system
+                .rasterize_msdf_glyph(&params, info)?
+                .with_context(|| format!("{character} must produce a closed MTSDF"))?;
+
+            assert_eq!(
+                bytes.len(),
+                info.raster_size.width.0 as usize * info.raster_size.height.0 as usize * 4
+            );
+            assert!(
+                bytes
+                    .chunks_exact(4)
+                    .any(|pixel| pixel[0] != pixel[1] || pixel[1] != pixel[2]),
+                "{character} unexpectedly collapsed to a grayscale SDF"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn mtsdf_rejects_a_zero_contour_reaching_the_tile_edge() {
+        let width = 3;
+        let height = 3;
+        let mut valid = vec![0; width * height * 4];
+        valid[(width + 1) * 4..(width + 1) * 4 + 4].copy_from_slice(&[255; 4]);
+        assert!(mtsdf_has_closed_exterior(&valid, width, height));
+
+        let mut leaking = valid;
+        leaking[(width + 2) * 4 + 3] = 128;
+        assert!(!mtsdf_has_closed_exterior(&leaking, width, height));
+    }
+
+    #[test]
+    fn paint_only_msdf_animation_reuses_the_line_layout() -> Result<()> {
+        let platform_text_system = Arc::new(text_system()?);
+        let text_system = Arc::new(gpui::TextSystem::new(platform_text_system));
+        let window_text_system = gpui::WindowTextSystem::new(text_system);
+        let text: SharedString = "Paint-only MTSDF animation".into();
+
+        let shape = |embolden: f32| {
+            window_text_system.shape_text(
+                text.clone(),
+                gpui::px(48.0),
+                &[gpui::TextRun {
+                    len: text.len(),
+                    font: gpui::font("IBM Plex Sans"),
+                    glyph_render_mode: gpui::GlyphRenderMode::Msdf,
+                    text_embolden: gpui::px(embolden),
+                    ..Default::default()
+                }],
+                None,
+                None,
+            )
+        };
+
+        let baseline = shape(0.0)?;
+        let baseline_layout =
+            std::ops::Deref::deref(&baseline[0]).as_ref() as *const gpui::WrappedLineLayout;
+        for frame in 0..1_000 {
+            let progress = frame as f32 / 999.0;
+            let line = shape(-2.0 + 4.0 * progress)?;
+            let layout =
+                std::ops::Deref::deref(&line[0]).as_ref() as *const gpui::WrappedLineLayout;
+            assert_eq!(layout, baseline_layout);
+        }
+        Ok(())
+    }
+
+    #[test]
     fn variable_weight_is_shared_by_shaping_metrics_and_rasterization() -> Result<()> {
         let Some(text_system) = variable_text_system() else {
             return Ok(());
@@ -1257,6 +1741,17 @@ mod tests {
         let glyph_id = text_system
             .glyph_for_char(intermediate_id, 'W')
             .context("Readex Pro must contain W")?;
+        let msdf = |font_id| -> Result<Vec<u8>> {
+            let params = MsdfGlyphParams::new(font_id, glyph_id);
+            let info = text_system
+                .msdf_glyph_info(&params)?
+                .context("Readex Pro W must have an outline")?;
+            text_system
+                .rasterize_msdf_glyph(&params, info)?
+                .context("Readex Pro W must produce a closed MTSDF")
+        };
+        assert_ne!(msdf(regular_id)?, msdf(intermediate_id)?);
+
         let render = |font_id| -> Result<(Size<DevicePixels>, Vec<u8>)> {
             let params = RenderGlyphParams {
                 font_id,

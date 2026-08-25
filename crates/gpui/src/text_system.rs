@@ -48,12 +48,25 @@ pub const SUBPIXEL_VARIANTS_X: u8 = 4;
 /// Number of subpixel glyph variants along the Y axis.
 pub const SUBPIXEL_VARIANTS_Y: u8 = 1;
 
+/// Resolution of the cached distance field relative to one em.
+///
+/// This is intentionally fixed so font size, window scale, color, and optical emboldening do not
+/// multiply atlas entries while those values animate.
+pub const MSDF_GENERATION_EM_PIXELS: u16 = 64;
+
+/// Distance-field pixels reserved around the outline at generation time.
+pub const MSDF_PADDING_PIXELS: u16 = 8;
+
+/// Below this physical size platform rasterization is generally crisper than an unhinted MTSDF.
+pub const MIN_MSDF_DEVICE_FONT_SIZE: f32 = 18.0;
+
 /// The GPUI text rendering sub system.
 pub struct TextSystem {
     platform_text_system: Arc<dyn PlatformTextSystem>,
     font_ids_by_font: RwLock<FxHashMap<Font, Result<FontId>>>,
     font_metrics: RwLock<FxHashMap<FontId, FontMetrics>>,
     raster_bounds: RwLock<FxHashMap<RenderGlyphParams, Bounds<DevicePixels>>>,
+    msdf_glyph_info: RwLock<FxHashMap<MsdfGlyphParams, Option<MsdfGlyphInfo>>>,
     wrapper_pool: Mutex<FxHashMap<FontIdWithSize, Vec<LineWrapper>>>,
     font_runs_pool: Mutex<Vec<Vec<FontRun>>>,
     fallback_font_stack: SmallVec<[Font; 2]>,
@@ -66,6 +79,7 @@ impl TextSystem {
             platform_text_system,
             font_metrics: RwLock::default(),
             raster_bounds: RwLock::default(),
+            msdf_glyph_info: RwLock::default(),
             font_ids_by_font: RwLock::default(),
             wrapper_pool: Mutex::default(),
             font_runs_pool: Mutex::default(),
@@ -350,6 +364,44 @@ impl TextSystem {
             .rasterize_glyph(params, raster_bounds)
     }
 
+    /// Whether the active backend can generate and draw true multi-channel distance fields.
+    pub(crate) fn supports_msdf(&self) -> bool {
+        self.platform_text_system.supports_msdf()
+    }
+
+    /// Returns paint geometry for a cached MTSDF glyph, or `None` when this glyph must use the
+    /// platform rasterizer (for example bitmap/color fonts or empty outlines).
+    pub(crate) fn msdf_glyph_info(
+        &self,
+        params: &MsdfGlyphParams,
+    ) -> Result<Option<MsdfGlyphInfo>> {
+        let info = self.msdf_glyph_info.upgradable_read();
+        if let Some(info) = info.get(params) {
+            Ok(*info)
+        } else {
+            let mut info = RwLockUpgradableReadGuard::upgrade(info);
+            let glyph_info = self.platform_text_system.msdf_glyph_info(params)?;
+            info.insert(*params, glyph_info);
+            Ok(glyph_info)
+        }
+    }
+
+    pub(crate) fn rasterize_msdf_glyph(
+        &self,
+        params: &MsdfGlyphParams,
+        info: MsdfGlyphInfo,
+    ) -> Result<Option<Vec<u8>>> {
+        let bytes = self
+            .platform_text_system
+            .rasterize_msdf_glyph(params, info)?;
+        if bytes.is_none() {
+            // Generation performs the final field-integrity check. Remember a rejection so a
+            // pathological outline falls back once instead of being regenerated every frame.
+            self.msdf_glyph_info.write().insert(*params, None);
+        }
+        Ok(bytes)
+    }
+
     /// Returns the dilation level to use for a glyph painted in the given color.
     pub(crate) fn glyph_dilation_for_color(&self, color: Hsla) -> u8 {
         self.platform_text_system.glyph_dilation_for_color(color)
@@ -421,6 +473,8 @@ impl WindowTextSystem {
                 && last_run.underline == run.underline
                 && last_run.strikethrough == run.strikethrough
                 && last_run.background_color == run.background_color
+                && last_run.glyph_render_mode == run.glyph_render_mode
+                && last_run.text_embolden == run.text_embolden
             {
                 last_run.len += run.len as u32;
                 continue;
@@ -428,6 +482,8 @@ impl WindowTextSystem {
             decoration_runs.push(DecorationRun {
                 len: run.len as u32,
                 color: run.color,
+                glyph_render_mode: run.glyph_render_mode,
+                text_embolden: run.text_embolden,
                 background_color: run.background_color,
                 underline: run.underline,
                 strikethrough: run.strikethrough,
@@ -469,6 +525,8 @@ impl WindowTextSystem {
                 && last_run.underline == run.underline
                 && last_run.strikethrough == run.strikethrough
                 && last_run.background_color == run.background_color
+                && last_run.glyph_render_mode == run.glyph_render_mode
+                && last_run.text_embolden == run.text_embolden
             {
                 last_run.len += run.len as u32;
                 continue;
@@ -476,6 +534,8 @@ impl WindowTextSystem {
             decoration_runs.push(DecorationRun {
                 len: run.len as u32,
                 color: run.color,
+                glyph_render_mode: run.glyph_render_mode,
+                text_embolden: run.text_embolden,
                 background_color: run.background_color,
                 underline: run.underline,
                 strikethrough: run.strikethrough,
@@ -542,29 +602,37 @@ impl WindowTextSystem {
 
                 let run_len_within_line = cmp::min(line_end - run_start, run.len);
 
-                let decoration_changed = if let Some(last_run) = decoration_runs.last_mut()
-                    && last_run.color == run.color
-                    && last_run.underline == run.underline
-                    && last_run.strikethrough == run.strikethrough
-                    && last_run.background_color == run.background_color
-                {
-                    last_run.len += run_len_within_line as u32;
-                    false
+                let shape_boundary_changed = decoration_runs.last().is_none_or(|last_run| {
+                    last_run.color != run.color
+                        || last_run.underline != run.underline
+                        || last_run.strikethrough != run.strikethrough
+                        || last_run.background_color != run.background_color
+                });
+                let paint_decoration_changed = decoration_runs.last().is_none_or(|last_run| {
+                    shape_boundary_changed
+                        || last_run.glyph_render_mode != run.glyph_render_mode
+                        || last_run.text_embolden != run.text_embolden
+                });
+                if !paint_decoration_changed {
+                    decoration_runs
+                        .last_mut()
+                        .expect("a matching decoration run must exist")
+                        .len += run_len_within_line as u32;
                 } else {
                     decoration_runs.push(DecorationRun {
                         len: run_len_within_line as u32,
                         color: run.color,
+                        glyph_render_mode: run.glyph_render_mode,
+                        text_embolden: run.text_embolden,
                         background_color: run.background_color,
                         underline: run.underline,
                         strikethrough: run.strikethrough,
                     });
-                    true
-                };
-
+                }
                 let font_id = self.resolve_font(&run.font);
                 if let Some(font_run) = font_runs.last_mut()
                     && font_id == font_run.font_id
-                    && !decoration_changed
+                    && !shape_boundary_changed
                 {
                     font_run.len += run_len_within_line;
                 } else {
@@ -1019,6 +1087,10 @@ pub struct TextRun {
     pub font: Font,
     /// The color
     pub color: Hsla,
+    /// The glyph rendering path. This does not participate in font resolution or shaping.
+    pub glyph_render_mode: crate::GlyphRenderMode,
+    /// Paint-only optical emboldening for MSDF glyphs.
+    pub text_embolden: Pixels,
     /// The background color (if any)
     pub background_color: Option<Hsla>,
     /// The underline style (if any)
@@ -1057,6 +1129,44 @@ pub struct RenderGlyphParams {
     pub is_emoji: bool,
     pub subpixel_rendering: bool,
     pub dilation: u8,
+}
+
+/// Stable atlas identity for a generated multi-channel distance field.
+///
+/// Display size, scale factor, color, and optical emboldening are deliberately absent: all four
+/// are paint-time shader inputs, so animation reuses one field for each font-instance/glyph pair.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[expect(missing_docs)]
+pub struct MsdfGlyphParams {
+    pub font_id: FontId,
+    pub glyph_id: GlyphId,
+    pub generation_em_pixels: u16,
+    pub padding_pixels: u16,
+}
+
+impl MsdfGlyphParams {
+    /// Create the one fixed-resolution atlas identity for a font-instance/glyph pair.
+    pub fn new(font_id: FontId, glyph_id: GlyphId) -> Self {
+        Self {
+            font_id,
+            glyph_id,
+            generation_em_pixels: MSDF_GENERATION_EM_PIXELS,
+            padding_pixels: MSDF_PADDING_PIXELS,
+        }
+    }
+}
+
+/// Geometry shared by MTSDF atlas allocation and paint-time placement.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[expect(missing_docs)]
+pub struct MsdfGlyphInfo {
+    /// Glyph bounds in em, including the generated distance-field padding. Y points down and the
+    /// origin is relative to the baseline, matching GPUI paint coordinates.
+    pub bounds_em: Bounds<f32>,
+    pub raster_size: Size<DevicePixels>,
+    /// Distance from the outline bounds to the outermost sampled texel center. This is the exact
+    /// safe field range shared by paint placement and embolden clamping.
+    pub field_padding_em: f32,
 }
 
 impl Eq for RenderGlyphParams {}

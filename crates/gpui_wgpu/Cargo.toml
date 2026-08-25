@@ -23,6 +23,7 @@ collections.workspace = true
 cosmic-text = "0.19.0"
 etagere.workspace = true
 itertools.workspace = true
+bymsdfgen-core.workspace = true
 log.workspace = true
 parking_lot.workspace = true
 profiling.workspace = true

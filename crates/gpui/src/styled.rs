@@ -1,9 +1,9 @@
 use crate::{
     self as gpui, AbsoluteLength, AlignContent, AlignItems, AlignSelf, BorderStyle, CursorStyle,
     DefiniteLength, Display, Fill, FlexDirection, FlexWrap, Font, FontFeatures, FontStyle,
-    FontWeight, GridPlacement, GridTemplate, GridTemplateMinSize, Hsla, JustifyContent, Length,
-    Pixels, SharedString, StrikethroughStyle, StyleRefinement, TextAlign, TextOverflow,
-    TextStyleRefinement, UnderlineStyle, WhiteSpace, px, relative, rems,
+    FontWeight, GlyphRenderMode, GridPlacement, GridTemplate, GridTemplateMinSize, Hsla,
+    JustifyContent, Length, Pixels, SharedString, StrikethroughStyle, StyleRefinement, TextAlign,
+    TextOverflow, TextStyleRefinement, UnderlineStyle, WhiteSpace, px, relative, rems,
 };
 pub use gpui_macros::{
     border_style_methods, box_shadow_style_methods, cursor_style_methods, margin_style_methods,
@@ -564,6 +564,36 @@ pub trait Styled: Sized {
     /// This value cascades to its child elements.
     fn font_weight(mut self, weight: FontWeight) -> Self {
         self.text_style().font_weight = Some(weight);
+        self
+    }
+
+    /// Selects the rendering path for non-emoji glyphs.
+    ///
+    /// `Msdf` is opt-in and falls back to platform rasterization when unsupported or too small.
+    fn glyph_render_mode(mut self, mode: GlyphRenderMode) -> Self {
+        self.text_style().glyph_render_mode = Some(mode);
+        self
+    }
+
+    /// Sets paint-only optical emboldening for MSDF text.
+    ///
+    /// This does not change shaping, advances, wrapping, or the selected `FontId`. It has no
+    /// effect unless the glyph render mode is [`GlyphRenderMode::Msdf`].
+    fn text_embolden(mut self, embolden: Pixels) -> Self {
+        assert!(embolden.0.is_finite(), "MSDF text embolden must be finite");
+        self.text_style().text_embolden = Some(embolden);
+        self
+    }
+
+    /// Enables MSDF text and sets its paint-only optical emboldening.
+    ///
+    /// Calling this with zero still selects the MSDF path, avoiding a raster/MSDF switch at the
+    /// beginning of an animation.
+    fn msdf_text(mut self, embolden: Pixels) -> Self {
+        assert!(embolden.0.is_finite(), "MSDF text embolden must be finite");
+        let style = self.text_style();
+        style.glyph_render_mode = Some(GlyphRenderMode::Msdf);
+        style.text_embolden = Some(embolden);
         self
     }
 

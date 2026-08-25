@@ -438,6 +438,18 @@ pub enum TextAlign {
     Right,
 }
 
+/// Selects how non-emoji glyphs are rendered.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+pub enum GlyphRenderMode {
+    /// Use the platform's existing raster glyph path.
+    #[default]
+    PlatformRaster,
+    /// Use a multi-channel signed distance field when the active backend supports it.
+    ///
+    /// This is optical shader-based emboldening, not interpolation of an OpenType `wght` axis.
+    Msdf,
+}
+
 /// Effects applied to an element and its subtree as a whole, the way CSS filters work.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct LayerFilter {
@@ -496,6 +508,12 @@ pub struct TextStyle {
     /// The font style, e.g. italic
     pub font_style: FontStyle,
 
+    /// The glyph rendering path used for non-emoji text.
+    pub glyph_render_mode: GlyphRenderMode,
+
+    /// Paint-only optical emboldening for MSDF glyphs.
+    pub text_embolden: Pixels,
+
     /// The background color of the text
     pub background_color: Option<Hsla>,
 
@@ -530,6 +548,8 @@ impl Default for TextStyle {
             line_height: phi(),
             font_weight: FontWeight::default(),
             font_style: FontStyle::default(),
+            glyph_render_mode: GlyphRenderMode::default(),
+            text_embolden: px(0.0),
             background_color: None,
             underline: None,
             strikethrough: None,
@@ -550,6 +570,12 @@ impl TextStyle {
         }
         if let Some(style) = style.font_style {
             self.font_style = style;
+        }
+        if let Some(render_mode) = style.glyph_render_mode {
+            self.glyph_render_mode = render_mode;
+        }
+        if let Some(embolden) = style.text_embolden {
+            self.text_embolden = embolden;
         }
 
         if let Some(color) = style.color {
@@ -603,6 +629,8 @@ impl TextStyle {
                 style: self.font_style,
             },
             color: self.color,
+            glyph_render_mode: self.glyph_render_mode,
+            text_embolden: self.text_embolden,
             background_color: self.background_color,
             underline: self.underline,
             strikethrough: self.strikethrough,
@@ -622,6 +650,12 @@ pub struct HighlightStyle {
 
     /// The font style, e.g. italic
     pub font_style: Option<FontStyle>,
+
+    /// The glyph rendering path.
+    pub glyph_render_mode: Option<GlyphRenderMode>,
+
+    /// Paint-only optical emboldening for MSDF glyphs.
+    pub text_embolden: Option<Pixels>,
 
     /// The background color of the text
     pub background_color: Option<Hsla>,
@@ -643,6 +677,8 @@ impl Hash for HighlightStyle {
         self.color.hash(state);
         self.font_weight.hash(state);
         self.font_style.hash(state);
+        self.glyph_render_mode.hash(state);
+        self.text_embolden.hash(state);
         self.background_color.hash(state);
         self.underline.hash(state);
         self.strikethrough.hash(state);
@@ -960,6 +996,8 @@ impl From<&TextStyle> for HighlightStyle {
             color: Some(other.color),
             font_weight: Some(other.font_weight),
             font_style: Some(other.font_style),
+            glyph_render_mode: Some(other.glyph_render_mode),
+            text_embolden: Some(other.text_embolden),
             background_color: other.background_color,
             underline: other.underline,
             strikethrough: other.strikethrough,
@@ -993,6 +1031,8 @@ impl HighlightStyle {
                 .or(self.color),
             font_weight: other.font_weight.or(self.font_weight),
             font_style: other.font_style.or(self.font_style),
+            glyph_render_mode: other.glyph_render_mode.or(self.glyph_render_mode),
+            text_embolden: other.text_embolden.or(self.text_embolden),
             background_color: other.background_color.or(self.background_color),
             underline: other.underline.or(self.underline),
             strikethrough: other.strikethrough.or(self.strikethrough),
@@ -1418,6 +1458,16 @@ mod tests {
         let _ = StyleRefinement::default().layer_scale(f32::NAN);
     }
 
+    #[test]
+    fn zero_embolden_still_selects_msdf_rendering() {
+        let refinement = StyleRefinement::default().msdf_text(px(0.0));
+        assert_eq!(
+            refinement.text.glyph_render_mode,
+            Some(GlyphRenderMode::Msdf)
+        );
+        assert_eq!(refinement.text.text_embolden, Some(px(0.0)));
+    }
+
     #[perf]
     fn test_basic_highlight_style_combination() {
         let style_a = HighlightStyle::default();
@@ -1438,6 +1488,8 @@ mod tests {
             fade_out: Some(0.),
             font_style: Some(FontStyle::Italic),
             font_weight: Some(FontWeight(300.)),
+            glyph_render_mode: Some(GlyphRenderMode::Msdf),
+            text_embolden: Some(px(1.0)),
             background_color: Some(yellow()),
             underline: Some(UnderlineStyle {
                 thickness: px(2.),
@@ -1470,6 +1522,8 @@ mod tests {
             fade_out: Some(0.),
             font_style: Some(FontStyle::Oblique),
             font_weight: Some(FontWeight(800.)),
+            glyph_render_mode: Some(GlyphRenderMode::PlatformRaster),
+            text_embolden: Some(px(2.0)),
             background_color: Some(green()),
             underline: Some(UnderlineStyle {
                 thickness: px(4.),
@@ -1488,6 +1542,8 @@ mod tests {
             fade_out: Some(0.),
             font_style: Some(FontStyle::Oblique),
             font_weight: Some(FontWeight(800.)),
+            glyph_render_mode: Some(GlyphRenderMode::PlatformRaster),
+            text_embolden: Some(px(2.0)),
             background_color: Some(green()),
             underline: Some(UnderlineStyle {
                 thickness: px(4.),
