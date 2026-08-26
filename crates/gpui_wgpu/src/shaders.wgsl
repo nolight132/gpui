@@ -1324,8 +1324,9 @@ fn fs_msdf_sprite(input: MsdfSpriteVarying) -> @location(0) vec4<f32> {
     // row morphology preserves the row bounds but can still strengthen cap antialiasing enough to
     // look like a half-pixel vertical expansion.
     let true_distance_gradient = vec2<f32>(dpdx(sample.a), dpdy(sample.a));
-    let horizontal_weight = abs(true_distance_gradient.x) /
+    let horizontal_alignment = abs(true_distance_gradient.x) /
         max(length(true_distance_gradient), 0.0001);
+    let horizontal_weight = smoothstep(0.75, 0.95, horizontal_alignment);
     var screen_distance = signed_distance * input.distance.x + input.distance.y;
     if (input.horizontal_embolden != 0u) {
         let left_position = clamp(
@@ -1357,7 +1358,14 @@ fn fs_msdf_sprite(input: MsdfSpriteVarying) -> @location(0) vec4<f32> {
     );
     let antialias_width = clamp(inverse_screen_scale, 0.0001, 1.0);
     let coverage = saturate(screen_distance / antialias_width + 0.5);
-    let alpha_corrected = apply_contrast_and_gamma_correction(coverage, input.color.rgb, gamma_params.grayscale_enhanced_contrast, gamma_params.gamma_ratios);
+    // Horizontal MSDF is used for animated color and weight transitions. Keep its coverage purely
+    // geometric so changing the text color cannot change the apparent glyph bounds.
+    let color_corrected = apply_contrast_and_gamma_correction(coverage, input.color.rgb, gamma_params.grayscale_enhanced_contrast, gamma_params.gamma_ratios);
+    let alpha_corrected = select(
+        color_corrected,
+        coverage,
+        input.horizontal_embolden != 0u,
+    );
 
     // Clip only after derivatives have been evaluated, as required by uniform control flow.
     if (any(input.clip_distances < vec4<f32>(0.0))) {

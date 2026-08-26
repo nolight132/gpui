@@ -1247,8 +1247,9 @@ float4 msdf_sprite_fragment(MsdfSpriteVertexOutput input): SV_Target {
         max(min(sample.r, sample.g), min(max(sample.r, sample.g), sample.b)) - 0.5;
     float2 horizontal_step = ddx(input.tile_position) * abs(input.distance.y);
     float2 true_distance_gradient = float2(ddx(sample.a), ddy(sample.a));
-    float horizontal_weight = abs(true_distance_gradient.x) /
+    float horizontal_alignment = abs(true_distance_gradient.x) /
         max(length(true_distance_gradient), 0.0001);
+    float horizontal_weight = smoothstep(0.75, 0.95, horizontal_alignment);
     float screen_distance = signed_distance * input.distance.x + input.distance.y;
     if (input.horizontal_embolden != 0) {
         float2 left_position = clamp(
@@ -1271,8 +1272,9 @@ float4 msdf_sprite_fragment(MsdfSpriteVertexOutput input): SV_Target {
         (length(ddx(input.field_position)) + length(ddy(input.field_position)));
     float antialias_width = clamp(inverse_screen_scale, 0.0001, 1.0);
     float coverage = saturate(screen_distance / antialias_width + 0.5);
-    float alpha_corrected = apply_contrast_and_gamma_correction(
+    float color_corrected = apply_contrast_and_gamma_correction(
         coverage, input.color.rgb, grayscale_enhanced_contrast, gamma_ratios);
+    float alpha_corrected = input.horizontal_embolden != 0 ? coverage : color_corrected;
 
     // Derivatives above must execute uniformly; apply clipping afterwards.
     if (any(input.clip_distance < 0.0)) {
