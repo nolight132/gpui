@@ -1204,8 +1204,8 @@ MonochromeSpriteVertexOutput monochrome_sprite_vertex(uint vertex_id: SV_VertexI
                           sprite.sweep_embolden, sprite.sweep_progress);
     output.tile_bounds = float4(
         float2(sprite.tile.bounds.origin.x, sprite.tile.bounds.origin.y),
-        float2(sprite.tile.bounds.origin.x + sprite.tile.bounds.size.width,
-               sprite.tile.bounds.origin.y + sprite.tile.bounds.size.height));
+        float2(sprite.tile.bounds.origin.x + sprite.tile.bounds.size.x,
+               sprite.tile.bounds.origin.y + sprite.tile.bounds.size.y));
     output.clip_distance = clip_distance;
     return output;
 }
@@ -1259,15 +1259,66 @@ MonochromeSpriteVertexOutput subpixel_sprite_vertex(uint vertex_id: SV_VertexID,
 }
 
 SubpixelSpriteFragmentOutput subpixel_sprite_fragment(MonochromeSpriteFragmentInput input) {
-    float3 sample = t_sprite.Sample(s_sprite, input.tile_position).rgb;
+    float3 sample;
+    float4 color = input.color;
+    if (input.sweep.w < 0.0) {
+        sample = t_sprite.Sample(s_sprite, input.tile_position).rgb;
+    } else {
+        uint atlas_width;
+        uint atlas_height;
+        t_sprite.GetDimensions(atlas_width, atlas_height);
+        float2 atlas_size = float2(atlas_width, atlas_height);
+        float4 normalized_tile_bounds = float4(
+            input.tile_bounds.xy / atlas_size,
+            input.tile_bounds.zw / atlas_size);
+        float2 half_texel = 0.5 / atlas_size;
+        float2 safe_position = clamp(
+            input.tile_position,
+            normalized_tile_bounds.xy + half_texel,
+            normalized_tile_bounds.zw - half_texel);
+        bool inside = all(input.tile_position >= normalized_tile_bounds.xy)
+            && all(input.tile_position <= normalized_tile_bounds.zw);
+        sample = inside ? t_sprite.Sample(s_sprite, safe_position).rgb : 0.0;
+
+        float transition = 0.0;
+        if (input.sweep.w >= 1.0) {
+            transition = 1.0;
+        } else if (input.sweep.w > 0.0) {
+            transition = 1.0 - smoothstep(
+                input.sweep.x - input.sweep.y,
+                input.sweep.x,
+                input.position.x);
+        }
+        float2 horizontal_step = ddx(input.tile_position) * input.sweep.z;
+        float2 left_position = input.tile_position - horizontal_step;
+        float2 right_position = input.tile_position + horizontal_step;
+        bool left_inside = all(left_position >= normalized_tile_bounds.xy)
+            && all(left_position <= normalized_tile_bounds.zw);
+        bool right_inside = all(right_position >= normalized_tile_bounds.xy)
+            && all(right_position <= normalized_tile_bounds.zw);
+        float3 left = left_inside
+            ? t_sprite.Sample(s_sprite, clamp(
+                left_position,
+                normalized_tile_bounds.xy + half_texel,
+                normalized_tile_bounds.zw - half_texel)).rgb
+            : 0.0;
+        float3 right = right_inside
+            ? t_sprite.Sample(s_sprite, clamp(
+                right_position,
+                normalized_tile_bounds.xy + half_texel,
+                normalized_tile_bounds.zw - half_texel)).rgb
+            : 0.0;
+        sample = lerp(sample, max(sample, max(left, right)), transition);
+        color = lerp(input.color, input.active_color, transition);
+    }
     if (is_bgr) {
         sample = sample.bgr;
     }
-    float3 alpha_corrected = apply_contrast_and_gamma_correction3(sample, input.color.rgb, subpixel_enhanced_contrast, gamma_ratios);
+    float3 alpha_corrected = apply_contrast_and_gamma_correction3(sample, color.rgb, subpixel_enhanced_contrast, gamma_ratios);
 
     SubpixelSpriteFragmentOutput output;
-    output.foreground = float4(input.color.rgb, 1.0f);
-    output.alpha = float4(input.color.a * alpha_corrected, 1.0f);
+    output.foreground = float4(color.rgb, 1.0f);
+    output.alpha = float4(color.a * alpha_corrected, 1.0f);
     return output;
 }
 
