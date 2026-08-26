@@ -1181,8 +1181,19 @@ MonochromeSpriteVertexOutput monochrome_sprite_vertex(uint vertex_id: SV_VertexI
     float4 device_position =
         to_device_position_transformed(unit_vertex, sprite.bounds, sprite.transformation);
     float4 clip_distance = distance_from_clip_rect_transformed(unit_vertex, sprite.bounds, sprite.content_mask, sprite.transformation);
-    float2 tile_position = to_tile_position(unit_vertex, sprite.tile);
     float4 color = hsla_to_rgba(sprite.color);
+    uint atlas_width;
+    uint atlas_height;
+    t_sprite.GetDimensions(atlas_width, atlas_height);
+    float2 atlas_size = float2(atlas_width, atlas_height);
+    float2 tile_origin = float2(sprite.tile.bounds.origin);
+    float2 tile_size = float2(sprite.tile.bounds.size);
+    float horizontal_padding = sprite.sweep_progress >= 0.0
+        ? ceil(max(sprite.sweep_embolden, 0.0))
+        : 0.0;
+    float2 padded_origin = tile_origin - float2(horizontal_padding, 0.0);
+    float2 padded_size = tile_size + float2(2.0 * horizontal_padding, 0.0);
+    float2 tile_position = (padded_origin + unit_vertex * padded_size) / atlas_size;
 
     MonochromeSpriteVertexOutput output;
     output.position = device_position;
@@ -1192,15 +1203,38 @@ MonochromeSpriteVertexOutput monochrome_sprite_vertex(uint vertex_id: SV_VertexI
     output.sweep = float4(sprite.sweep_front, sprite.sweep_softness,
                           sprite.sweep_embolden, sprite.sweep_progress);
     output.tile_bounds = float4(
-        float2(sprite.tile.bounds.origin.x, sprite.tile.bounds.origin.y) + 0.5,
+        float2(sprite.tile.bounds.origin.x, sprite.tile.bounds.origin.y),
         float2(sprite.tile.bounds.origin.x + sprite.tile.bounds.size.width,
-               sprite.tile.bounds.origin.y + sprite.tile.bounds.size.height) - 0.5);
+               sprite.tile.bounds.origin.y + sprite.tile.bounds.size.height));
     output.clip_distance = clip_distance;
     return output;
 }
 
+float sample_mono_tile(float2 position, float4 tile_bounds) {
+    bool inside = all(position >= tile_bounds.xy) && all(position <= tile_bounds.zw);
+    uint atlas_width;
+    uint atlas_height;
+    t_sprite.GetDimensions(atlas_width, atlas_height);
+    float2 half_texel = 0.5 / float2(atlas_width, atlas_height);
+    float2 safe_position = clamp(position, tile_bounds.xy + half_texel,
+                                 tile_bounds.zw - half_texel);
+    return inside ? t_sprite.Sample(s_sprite, safe_position).r : 0.0;
+}
+
 float4 monochrome_sprite_fragment(MonochromeSpriteFragmentInput input): SV_Target {
-    float sample = t_sprite.Sample(s_sprite, input.tile_position).r;
+    if (input.sweep.w < 0.0) {
+        float sample = t_sprite.Sample(s_sprite, input.tile_position).r;
+        float alpha_corrected = apply_contrast_and_gamma_correction(sample, input.color.rgb, grayscale_enhanced_contrast, gamma_ratios);
+        return float4(input.color.rgb, input.color.a * alpha_corrected);
+    }
+    uint atlas_width;
+    uint atlas_height;
+    t_sprite.GetDimensions(atlas_width, atlas_height);
+    float2 atlas_size = float2(atlas_width, atlas_height);
+    float2 tile_min = input.tile_bounds.xy / atlas_size;
+    float2 tile_max = input.tile_bounds.zw / atlas_size;
+    float4 normalized_tile_bounds = float4(tile_min, tile_max);
+    float sample = sample_mono_tile(input.tile_position, normalized_tile_bounds);
     if (input.sweep.w <= 0.0) {
         float alpha_corrected = apply_contrast_and_gamma_correction(sample, input.color.rgb, grayscale_enhanced_contrast, gamma_ratios);
         return float4(input.color.rgb, input.color.a * alpha_corrected);
@@ -1211,15 +1245,9 @@ float4 monochrome_sprite_fragment(MonochromeSpriteFragmentInput input): SV_Targe
     } else if (input.sweep.w > 0.0) {
         transition = 1.0 - smoothstep(input.sweep.x - input.sweep.y, input.sweep.x, input.position.x);
     }
-    uint atlas_width;
-    uint atlas_height;
-    t_sprite.GetDimensions(atlas_width, atlas_height);
-    float2 atlas_size = float2(atlas_width, atlas_height);
-    float2 tile_min = input.tile_bounds.xy / atlas_size;
-    float2 tile_max = input.tile_bounds.zw / atlas_size;
     float2 horizontal_step = ddx(input.tile_position) * input.sweep.z;
-    float left = t_sprite.Sample(s_sprite, clamp(input.tile_position - horizontal_step, tile_min, tile_max)).r;
-    float right = t_sprite.Sample(s_sprite, clamp(input.tile_position + horizontal_step, tile_min, tile_max)).r;
+    float left = sample_mono_tile(input.tile_position - horizontal_step, normalized_tile_bounds);
+    float right = sample_mono_tile(input.tile_position + horizontal_step, normalized_tile_bounds);
     float coverage = lerp(sample, max(sample, max(left, right)), transition);
     float4 color = lerp(input.color, input.active_color, transition);
     float alpha_corrected = apply_contrast_and_gamma_correction(coverage, color.rgb, grayscale_enhanced_contrast, gamma_ratios);
