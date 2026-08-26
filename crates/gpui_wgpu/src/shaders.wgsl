@@ -1319,6 +1319,13 @@ fn fs_msdf_sprite(input: MsdfSpriteVarying) -> @location(0) vec4<f32> {
     // Horizontal mode performs morphology using samples from this exact screen row. Unlike a
     // contour-normal approximation, it cannot add coverage above or below the original glyph.
     let horizontal_step = dpdx(input.tile_position) * abs(input.distance.y);
+    // The true-distance alpha channel has a stable gradient around corners. Use its horizontal
+    // component to keep dilation on side contours while fading it out on horizontal caps. Pure
+    // row morphology preserves the row bounds but can still strengthen cap antialiasing enough to
+    // look like a half-pixel vertical expansion.
+    let true_distance_gradient = vec2<f32>(dpdx(sample.a), dpdy(sample.a));
+    let horizontal_weight = abs(true_distance_gradient.x) /
+        max(length(true_distance_gradient), 0.0001);
     var screen_distance = signed_distance * input.distance.x + input.distance.y;
     if (input.horizontal_embolden != 0u) {
         let left_position = clamp(
@@ -1337,7 +1344,9 @@ fn fs_msdf_sprite(input: MsdfSpriteVarying) -> @location(0) vec4<f32> {
         let right_distance = max(min(right.r, right.g), min(max(right.r, right.g), right.b)) - 0.5;
         let dilated = max(signed_distance, max(left_distance, right_distance));
         let eroded = min(signed_distance, min(left_distance, right_distance));
-        screen_distance = select(eroded, dilated, input.distance.y >= 0.0) * input.distance.x;
+        let horizontal_distance = select(eroded, dilated, input.distance.y >= 0.0);
+        screen_distance = mix(signed_distance, horizontal_distance, horizontal_weight) *
+            input.distance.x;
     }
     // Derive the output scale from linear em coordinates instead of the sampled MSDF value.
     // fwidth(signed_distance) spikes where the median changes channels at a corner, widening AA

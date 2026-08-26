@@ -725,6 +725,9 @@ fragment float4 msdf_sprite_fragment(
   float signed_distance =
       max(min(sample.r, sample.g), min(max(sample.r, sample.g), sample.b)) - 0.5;
   float2 horizontal_step = dfdx(input.tile_position) * abs(input.distance.y);
+  float2 true_distance_gradient = float2(dfdx(sample.a), dfdy(sample.a));
+  float horizontal_weight = abs(true_distance_gradient.x) /
+      max(length(true_distance_gradient), 0.0001);
   float screen_distance = signed_distance * input.distance.x + input.distance.y;
   if (input.horizontal_embolden != 0) {
     float2 left_position = clamp(
@@ -740,7 +743,8 @@ fragment float4 msdf_sprite_fragment(
     float horizontal_distance = input.distance.y >= 0.0
         ? max(signed_distance, max(left_distance, right_distance))
         : min(signed_distance, min(left_distance, right_distance));
-    screen_distance = horizontal_distance * input.distance.x;
+    screen_distance = mix(signed_distance, horizontal_distance, horizontal_weight) *
+        input.distance.x;
   }
   float inverse_screen_scale = 0.5 * input.distance.x *
       (length(dfdx(input.field_position)) + length(dfdy(input.field_position)));
