@@ -1281,6 +1281,7 @@ struct MsdfSpriteVarying {
     @location(3) clip_distances: vec4<f32>,
     @location(4) field_position: vec2<f32>,
     @location(5) @interpolate(flat) horizontal_embolden: u32,
+    @location(6) @interpolate(flat) tile_bounds: vec4<f32>,
 }
 
 @vertex
@@ -1294,12 +1295,15 @@ fn vs_msdf_sprite(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index
     // atlas allocation into the field's padding.
     let atlas_size = vec2<f32>(textureDimensions(t_sprite, 0));
     let tile_size = vec2<f32>(sprite.tile.bounds.size);
-    out.tile_position = (vec2<f32>(sprite.tile.bounds.origin) + vec2<f32>(0.5) + unit_vertex * (tile_size - vec2<f32>(1.0))) / atlas_size;
+    let tile_min = (vec2<f32>(sprite.tile.bounds.origin) + vec2<f32>(0.5)) / atlas_size;
+    let tile_max = (vec2<f32>(sprite.tile.bounds.origin) + tile_size - vec2<f32>(0.5)) / atlas_size;
+    out.tile_position = mix(tile_min, tile_max, unit_vertex);
     out.color = hsla_to_rgba(sprite.color);
     out.distance = vec2<f32>(sprite.distance_scale, sprite.embolden);
     out.clip_distances = distance_from_clip_rect_transformed(unit_vertex, sprite.bounds, sprite.content_mask, sprite.transformation);
     out.field_position = unit_vertex * vec2<f32>(sprite.bounds.size) / sprite.distance_scale;
     out.horizontal_embolden = sprite.horizontal_embolden;
+    out.tile_bounds = vec4<f32>(tile_min, tile_max);
     return out;
 }
 
@@ -1312,14 +1316,29 @@ fn fs_msdf_sprite(input: MsdfSpriteVarying) -> @location(0) vec4<f32> {
     // channel available for future soft effects, but decode the glyph contour from median RGB:
     // substituting alpha around corners turns the sharp MSDF contour into a rounded SDF contour.
     let signed_distance = max(min(sample.r, sample.g), min(max(sample.r, sample.g), sample.b)) - 0.5;
-    // Use the smooth true-distance channel only to recover the contour normal. Weighting the
-    // displacement by its horizontal component expands vertical edges while leaving horizontal
-    // edges in place, so animated emboldening changes glyph width without changing its height.
-    let true_signed_distance = sample.a - 0.5;
-    let screen_gradient = vec2<f32>(dpdx(true_signed_distance), dpdy(true_signed_distance));
-    let horizontal_normal_share = abs(screen_gradient.x) / max(length(screen_gradient), 0.0001);
-    let embolden_share = select(1.0, horizontal_normal_share, input.horizontal_embolden != 0u);
-    let screen_distance = signed_distance * input.distance.x + input.distance.y * embolden_share;
+    // Horizontal mode performs morphology using samples from this exact screen row. Unlike a
+    // contour-normal approximation, it cannot add coverage above or below the original glyph.
+    let horizontal_step = dpdx(input.tile_position) * abs(input.distance.y);
+    var screen_distance = signed_distance * input.distance.x + input.distance.y;
+    if (input.horizontal_embolden != 0u) {
+        let left_position = clamp(
+            input.tile_position - horizontal_step,
+            input.tile_bounds.xy,
+            input.tile_bounds.zw,
+        );
+        let right_position = clamp(
+            input.tile_position + horizontal_step,
+            input.tile_bounds.xy,
+            input.tile_bounds.zw,
+        );
+        let left = textureSampleLevel(t_sprite, s_sprite, left_position, 0.0);
+        let right = textureSampleLevel(t_sprite, s_sprite, right_position, 0.0);
+        let left_distance = max(min(left.r, left.g), min(max(left.r, left.g), left.b)) - 0.5;
+        let right_distance = max(min(right.r, right.g), min(max(right.r, right.g), right.b)) - 0.5;
+        let dilated = max(signed_distance, max(left_distance, right_distance));
+        let eroded = min(signed_distance, min(left_distance, right_distance));
+        screen_distance = select(eroded, dilated, input.distance.y >= 0.0) * input.distance.x;
+    }
     // Derive the output scale from linear em coordinates instead of the sampled MSDF value.
     // fwidth(signed_distance) spikes where the median changes channels at a corner, widening AA
     // into an otherwise opaque stroke. Coordinate derivatives stay smooth across those corners

@@ -1209,6 +1209,7 @@ struct MsdfSpriteVertexOutput {
     float4 clip_distance: TEXCOORD1;
     float2 field_position: TEXCOORD2;
     nointerpolation uint horizontal_embolden: TEXCOORD3;
+    nointerpolation float4 tile_bounds: TEXCOORD4;
 };
 
 StructuredBuffer<MsdfSprite> msdf_sprites: register(t1);
@@ -1226,15 +1227,17 @@ MsdfSpriteVertexOutput msdf_sprite_vertex(uint vertex_id: SV_VertexID, uint inst
     MsdfSpriteVertexOutput output;
     output.position =
         to_device_position_transformed(unit_vertex, sprite.bounds, sprite.transformation);
-    output.tile_position =
-        (tile_origin + 0.5 + unit_vertex * (tile_size - 1.0)) /
-        float2(float(atlas_width), float(atlas_height));
+    float2 atlas_size = float2(float(atlas_width), float(atlas_height));
+    float2 tile_min = (tile_origin + 0.5) / atlas_size;
+    float2 tile_max = (tile_origin + tile_size - 0.5) / atlas_size;
+    output.tile_position = lerp(tile_min, tile_max, unit_vertex);
     output.color = hsla_to_rgba(sprite.color);
     output.distance = float2(sprite.distance_scale, sprite.embolden);
     output.clip_distance = distance_from_clip_rect_transformed(
         unit_vertex, sprite.bounds, sprite.content_mask, sprite.transformation);
     output.field_position = unit_vertex * sprite.bounds.size / sprite.distance_scale;
     output.horizontal_embolden = sprite.horizontal_embolden;
+    output.tile_bounds = float4(tile_min, tile_max);
     return output;
 }
 
@@ -1242,15 +1245,24 @@ float4 msdf_sprite_fragment(MsdfSpriteVertexOutput input): SV_Target {
     float4 sample = t_sprite.Sample(s_sprite, input.tile_position);
     float signed_distance =
         max(min(sample.r, sample.g), min(max(sample.r, sample.g), sample.b)) - 0.5;
-    // The alpha true-distance channel supplies a stable contour normal. Its horizontal component
-    // makes emboldening widen the glyph without moving its top and bottom edges.
-    float true_signed_distance = sample.a - 0.5;
-    float2 screen_gradient = float2(ddx(true_signed_distance), ddy(true_signed_distance));
-    float horizontal_normal_share =
-        abs(screen_gradient.x) / max(length(screen_gradient), 0.0001);
-    float embolden_share = input.horizontal_embolden != 0 ? horizontal_normal_share : 1.0;
-    float screen_distance =
-        signed_distance * input.distance.x + input.distance.y * embolden_share;
+    float2 horizontal_step = ddx(input.tile_position) * abs(input.distance.y);
+    float screen_distance = signed_distance * input.distance.x + input.distance.y;
+    if (input.horizontal_embolden != 0) {
+        float2 left_position = clamp(
+            input.tile_position - horizontal_step, input.tile_bounds.xy, input.tile_bounds.zw);
+        float2 right_position = clamp(
+            input.tile_position + horizontal_step, input.tile_bounds.xy, input.tile_bounds.zw);
+        float4 left = t_sprite.SampleLevel(s_sprite, left_position, 0.0);
+        float4 right = t_sprite.SampleLevel(s_sprite, right_position, 0.0);
+        float left_distance =
+            max(min(left.r, left.g), min(max(left.r, left.g), left.b)) - 0.5;
+        float right_distance =
+            max(min(right.r, right.g), min(max(right.r, right.g), right.b)) - 0.5;
+        float horizontal_distance = input.distance.y >= 0.0
+            ? max(signed_distance, max(left_distance, right_distance))
+            : min(signed_distance, min(left_distance, right_distance));
+        screen_distance = horizontal_distance * input.distance.x;
+    }
     float inverse_screen_scale = 0.5 * input.distance.x *
         (length(ddx(input.field_position)) + length(ddy(input.field_position)));
     float antialias_width = clamp(inverse_screen_scale, 0.0001, 1.0);

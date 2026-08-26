@@ -678,6 +678,7 @@ struct MsdfSpriteVertexOutput {
   float4 color [[flat]];
   float2 distance [[flat]];
   uint horizontal_embolden [[flat]];
+  float4 tile_bounds [[flat]];
   float4 clip_distance;
   float2 field_position;
 };
@@ -701,6 +702,8 @@ vertex MsdfSpriteVertexOutput msdf_sprite_vertex(
   float2 atlas_dimensions = float2(atlas_size->width, atlas_size->height);
   float2 tile_position =
       (tile_origin + 0.5 + unit_vertex * (tile_size - 1.0)) / atlas_dimensions;
+  float2 tile_min = (tile_origin + 0.5) / atlas_dimensions;
+  float2 tile_max = (tile_origin + tile_size - 0.5) / atlas_dimensions;
   float2 field_position = unit_vertex *
       float2(sprite.bounds.size.width, sprite.bounds.size.height) / sprite.distance_scale;
   return MsdfSpriteVertexOutput{
@@ -709,6 +712,7 @@ vertex MsdfSpriteVertexOutput msdf_sprite_vertex(
       hsla_to_rgba(sprite.color),
       float2(sprite.distance_scale, sprite.embolden),
       sprite.horizontal_embolden,
+      float4(tile_min, tile_max),
       clip_distance,
       field_position};
 }
@@ -720,15 +724,24 @@ fragment float4 msdf_sprite_fragment(
   float4 sample = atlas_texture.sample(atlas_texture_sampler, input.tile_position);
   float signed_distance =
       max(min(sample.r, sample.g), min(max(sample.r, sample.g), sample.b)) - 0.5;
-  // The alpha true-distance channel supplies a stable contour normal. Its horizontal component
-  // makes emboldening widen the glyph without moving its top and bottom edges.
-  float true_signed_distance = sample.a - 0.5;
-  float2 screen_gradient = float2(dfdx(true_signed_distance), dfdy(true_signed_distance));
-  float horizontal_normal_share =
-      abs(screen_gradient.x) / max(length(screen_gradient), 0.0001);
-  float embolden_share = input.horizontal_embolden != 0 ? horizontal_normal_share : 1.0;
-  float screen_distance =
-      signed_distance * input.distance.x + input.distance.y * embolden_share;
+  float2 horizontal_step = dfdx(input.tile_position) * abs(input.distance.y);
+  float screen_distance = signed_distance * input.distance.x + input.distance.y;
+  if (input.horizontal_embolden != 0) {
+    float2 left_position = clamp(
+        input.tile_position - horizontal_step, input.tile_bounds.xy, input.tile_bounds.zw);
+    float2 right_position = clamp(
+        input.tile_position + horizontal_step, input.tile_bounds.xy, input.tile_bounds.zw);
+    float4 left = atlas_texture.sample(atlas_texture_sampler, left_position, level(0.0));
+    float4 right = atlas_texture.sample(atlas_texture_sampler, right_position, level(0.0));
+    float left_distance =
+        max(min(left.r, left.g), min(max(left.r, left.g), left.b)) - 0.5;
+    float right_distance =
+        max(min(right.r, right.g), min(max(right.r, right.g), right.b)) - 0.5;
+    float horizontal_distance = input.distance.y >= 0.0
+        ? max(signed_distance, max(left_distance, right_distance))
+        : min(signed_distance, min(left_distance, right_distance));
+    screen_distance = horizontal_distance * input.distance.x;
+  }
   float inverse_screen_scale = 0.5 * input.distance.x *
       (length(dfdx(input.field_position)) + length(dfdy(input.field_position)));
   float antialias_width = clamp(inverse_screen_scale, 0.0001, 1.0);
