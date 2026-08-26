@@ -60,30 +60,6 @@ fn sample_subpixel_tile(position: vec2<f32>, tile_bounds: vec4<f32>) -> vec3<f32
     return select(vec3<f32>(0.0), textureSample(t_sprite, s_sprite, safe_position).rgb, inside);
 }
 
-fn shift_subpixels_left(previous: vec3<f32>, current: vec3<f32>, distance: f32) -> vec3<f32> {
-    let one = vec3<f32>(previous.b, current.r, current.g);
-    let two = vec3<f32>(previous.g, previous.b, current.r);
-    if (distance < 1.0) {
-        return mix(current, one, distance);
-    }
-    if (distance < 2.0) {
-        return mix(one, two, distance - 1.0);
-    }
-    return mix(two, previous, distance - 2.0);
-}
-
-fn shift_subpixels_right(current: vec3<f32>, next: vec3<f32>, distance: f32) -> vec3<f32> {
-    let one = vec3<f32>(current.g, current.b, next.r);
-    let two = vec3<f32>(current.b, next.r, next.g);
-    if (distance < 1.0) {
-        return mix(current, one, distance);
-    }
-    if (distance < 2.0) {
-        return mix(one, two, distance - 1.0);
-    }
-    return mix(two, next, distance - 2.0);
-}
-
 @fragment
 fn fs_subpixel_sprite(input: SubpixelSpriteOutput) -> SubpixelSpriteFragmentOutput {
     var sample: vec3<f32>;
@@ -98,21 +74,9 @@ fn fs_subpixel_sprite(input: SubpixelSpriteOutput) -> SubpixelSpriteFragmentOutp
         } else if (input.sweep.w > 0.0) {
             transition = 1.0 - smoothstep(input.sweep.x - input.sweep.y, input.sweep.x, input.position.x);
         }
-        let pixel_step = dpdx(input.tile_position);
-        let whole_pixels = floor(input.sweep.z);
-        let subpixels = fract(input.sweep.z) * 3.0;
-        let left_position = input.tile_position - pixel_step * whole_pixels;
-        let right_position = input.tile_position + pixel_step * whole_pixels;
-        var left_current = sample;
-        var right_current = sample;
-        if (whole_pixels > 0.0) {
-            left_current = sample_subpixel_tile(left_position, input.tile_bounds);
-            right_current = sample_subpixel_tile(right_position, input.tile_bounds);
-        }
-        let left_previous = sample_subpixel_tile(left_position - pixel_step, input.tile_bounds);
-        let right_next = sample_subpixel_tile(right_position + pixel_step, input.tile_bounds);
-        let left = shift_subpixels_left(left_previous, left_current, subpixels);
-        let right = shift_subpixels_right(right_current, right_next, subpixels);
+        let horizontal_step = dpdx(input.tile_position) * input.sweep.z;
+        let left = sample_subpixel_tile(input.tile_position - horizontal_step, input.tile_bounds);
+        let right = sample_subpixel_tile(input.tile_position + horizontal_step, input.tile_bounds);
         sample = mix(sample, max(sample, max(left, right)), transition);
         color = mix(input.color, input.active_color, transition);
     }
