@@ -1190,6 +1190,11 @@ pub struct MonochromeSprite {
     pub bounds: Bounds<ScaledPixels>,
     pub content_mask: ContentMask<ScaledPixels>,
     pub color: Hsla,
+    pub active_color: Hsla,
+    pub sweep_front: f32,
+    pub sweep_softness: f32,
+    pub sweep_embolden: f32,
+    pub sweep_progress: f32,
     pub tile: AtlasTile,
     pub transformation: TransformationMatrix,
 }

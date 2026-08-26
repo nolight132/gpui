@@ -622,6 +622,9 @@ struct MonochromeSpriteVertexOutput {
   float4 position [[position]];
   float2 tile_position;
   float4 color [[flat]];
+  float4 active_color [[flat]];
+  float4 sweep [[flat]];
+  float4 tile_bounds [[flat]];
   float4 clip_distance;
 };
 
@@ -629,6 +632,9 @@ struct MonochromeSpriteFragmentInput {
   float4 position [[position]];
   float2 tile_position;
   float4 color [[flat]];
+  float4 active_color [[flat]];
+  float4 sweep [[flat]];
+  float4 tile_bounds [[flat]];
   float4 clip_distance;
 };
 
@@ -648,10 +654,20 @@ vertex MonochromeSpriteVertexOutput monochrome_sprite_vertex(
                                                  sprite.content_mask.bounds, sprite.transformation);
   float2 tile_position = to_tile_position(unit_vertex, sprite.tile, atlas_size);
   float4 color = hsla_to_rgba(sprite.color);
+  float4 active_color = hsla_to_rgba(sprite.active_color);
+  float2 tile_min = (float2(sprite.tile.bounds.origin.x, sprite.tile.bounds.origin.y) + 0.5) /
+                    float2(atlas_size->width, atlas_size->height);
+  float2 tile_max = (float2(sprite.tile.bounds.origin.x + sprite.tile.bounds.size.width,
+                            sprite.tile.bounds.origin.y + sprite.tile.bounds.size.height) - 0.5) /
+                    float2(atlas_size->width, atlas_size->height);
   return MonochromeSpriteVertexOutput{
       device_position,
       tile_position,
       color,
+      active_color,
+      float4(sprite.sweep_front, sprite.sweep_softness,
+             sprite.sweep_embolden, sprite.sweep_progress),
+      float4(tile_min, tile_max),
       {clip_distance.x, clip_distance.y, clip_distance.z, clip_distance.w}};
 }
 
@@ -665,10 +681,26 @@ fragment float4 monochrome_sprite_fragment(
 
   constexpr sampler atlas_texture_sampler(mag_filter::linear,
                                           min_filter::linear);
-  float4 sample =
-      atlas_texture.sample(atlas_texture_sampler, input.tile_position);
-  float4 color = input.color;
-  color.a *= sample.a;
+  float sample = atlas_texture.sample(atlas_texture_sampler, input.tile_position).a;
+  if (input.sweep.w <= 0.0) {
+    float4 color = input.color;
+    color.a *= sample;
+    return color;
+  }
+  float transition = 0.0;
+  if (input.sweep.w >= 1.0) {
+    transition = 1.0;
+  } else if (input.sweep.w > 0.0) {
+    transition = 1.0 - smoothstep(input.sweep.x - input.sweep.y, input.sweep.x, input.position.x);
+  }
+  float2 horizontal_step = dfdx(input.tile_position) * input.sweep.z;
+  float left = atlas_texture.sample(atlas_texture_sampler,
+      clamp(input.tile_position - horizontal_step, input.tile_bounds.xy, input.tile_bounds.zw)).a;
+  float right = atlas_texture.sample(atlas_texture_sampler,
+      clamp(input.tile_position + horizontal_step, input.tile_bounds.xy, input.tile_bounds.zw)).a;
+  float coverage = mix(sample, max(sample, max(left, right)), transition);
+  float4 color = mix(input.color, input.active_color, transition);
+  color.a *= coverage;
   return color;
 }
 

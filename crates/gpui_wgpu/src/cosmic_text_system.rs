@@ -1040,6 +1040,44 @@ mod tests {
         Ok(text_system.layout_line(text, gpui::px(14.0), &runs))
     }
 
+    #[test]
+    fn paint_only_raster_sweep_reuses_the_line_layout() -> Result<()> {
+        let platform_text_system = Arc::new(text_system()?);
+        let text_system = Arc::new(gpui::TextSystem::new(platform_text_system));
+        let window_text_system = gpui::WindowTextSystem::new(text_system);
+        let text: SharedString = "Paint-only raster sweep".into();
+
+        let shape = |progress: f32| {
+            window_text_system.shape_text(
+                text.clone(),
+                gpui::px(24.0),
+                &[gpui::TextRun {
+                    len: text.len(),
+                    font: gpui::font("IBM Plex Sans"),
+                    raster_text_sweep: Some(gpui::RasterTextSweep {
+                        active_color: gpui::white(),
+                        progress,
+                        softness: gpui::px(8.0),
+                        embolden: gpui::px(0.3),
+                    }),
+                    ..Default::default()
+                }],
+                None,
+                None,
+            )
+        };
+
+        let baseline = shape(0.0)?;
+        let baseline_layout =
+            std::ops::Deref::deref(&baseline[0]).as_ref() as *const gpui::WrappedLineLayout;
+        for frame in 0..1_000 {
+            let line = shape(frame as f32 / 999.0)?;
+            let layout =
+                std::ops::Deref::deref(&line[0]).as_ref() as *const gpui::WrappedLineLayout;
+            assert_eq!(layout, baseline_layout);
+        }
+        Ok(())
+    }
     /// Mirrors the original crash: mixed-direction text reaching the shaper
     /// through `shape_text`, which only splits lines on `\n`.
     #[test]
