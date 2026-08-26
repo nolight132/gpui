@@ -1218,6 +1218,11 @@ struct MonochromeSprite {
     bounds: Bounds,
     content_mask: Bounds,
     color: Hsla,
+    active_color: Hsla,
+    sweep_front: f32,
+    sweep_softness: f32,
+    sweep_embolden: f32,
+    sweep_progress: f32,
     tile: AtlasTile,
     transformation: TransformationMatrix,
 }
@@ -1227,7 +1232,10 @@ struct MonoSpriteVarying {
     @builtin(position) position: vec4<f32>,
     @location(0) tile_position: vec2<f32>,
     @location(1) @interpolate(flat) color: vec4<f32>,
+    @location(2) @interpolate(flat) active_color: vec4<f32>,
     @location(3) clip_distances: vec4<f32>,
+    @location(4) @interpolate(flat) sweep: vec4<f32>,
+    @location(5) @interpolate(flat) tile_bounds: vec4<f32>,
 }
 
 @vertex
@@ -1240,6 +1248,12 @@ fn vs_mono_sprite(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index
 
     out.tile_position = to_tile_position(unit_vertex, sprite.tile);
     out.color = hsla_to_rgba(sprite.color);
+    out.active_color = hsla_to_rgba(sprite.active_color);
+    out.sweep = vec4<f32>(sprite.sweep_front, sprite.sweep_softness, sprite.sweep_embolden, sprite.sweep_progress);
+    let atlas_size = vec2<f32>(textureDimensions(t_sprite, 0));
+    let tile_min = (vec2<f32>(sprite.tile.bounds.origin) + vec2<f32>(0.5)) / atlas_size;
+    let tile_max = (vec2<f32>(sprite.tile.bounds.origin + sprite.tile.bounds.size) - vec2<f32>(0.5)) / atlas_size;
+    out.tile_bounds = vec4<f32>(tile_min, tile_max);
     out.clip_distances = distance_from_clip_rect_transformed(unit_vertex, sprite.bounds, sprite.content_mask, sprite.transformation);
     return out;
 }
@@ -1247,14 +1261,32 @@ fn vs_mono_sprite(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index
 @fragment
 fn fs_mono_sprite(input: MonoSpriteVarying) -> @location(0) vec4<f32> {
     let sample = textureSample(t_sprite, s_sprite, input.tile_position).r;
-    let alpha_corrected = apply_contrast_and_gamma_correction(sample, input.color.rgb, gamma_params.grayscale_enhanced_contrast, gamma_params.gamma_ratios);
+    if (input.sweep.w <= 0.0) {
+        let alpha_corrected = apply_contrast_and_gamma_correction(sample, input.color.rgb, gamma_params.grayscale_enhanced_contrast, gamma_params.gamma_ratios);
+        if (any(input.clip_distances < vec4<f32>(0.0))) {
+            return vec4<f32>(0.0);
+        }
+        return blend_color(input.color, alpha_corrected);
+    }
+    var transition = 0.0;
+    if (input.sweep.w >= 1.0) {
+        transition = 1.0;
+    } else if (input.sweep.w > 0.0) {
+        transition = 1.0 - smoothstep(input.sweep.x - input.sweep.y, input.sweep.x, input.position.x);
+    }
+    let horizontal_step = dpdx(input.tile_position) * input.sweep.z;
+    let left = textureSample(t_sprite, s_sprite, clamp(input.tile_position - horizontal_step, input.tile_bounds.xy, input.tile_bounds.zw)).r;
+    let right = textureSample(t_sprite, s_sprite, clamp(input.tile_position + horizontal_step, input.tile_bounds.xy, input.tile_bounds.zw)).r;
+    let coverage = mix(sample, max(sample, max(left, right)), transition);
+    let color = mix(input.color, input.active_color, transition);
+    let alpha_corrected = apply_contrast_and_gamma_correction(coverage, color.rgb, gamma_params.grayscale_enhanced_contrast, gamma_params.gamma_ratios);
 
     // Alpha clip after using the derivatives.
     if (any(input.clip_distances < vec4<f32>(0.0))) {
         return vec4<f32>(0.0);
     }
 
-    return blend_color(input.color, alpha_corrected);
+    return blend_color(color, alpha_corrected);
 }
 
 // --- polychrome sprites --- //

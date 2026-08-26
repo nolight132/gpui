@@ -4339,8 +4339,19 @@ impl Window {
         font_size: Pixels,
         color: Hsla,
     ) -> Result<()> {
-        self.invalidator.debug_assert_paint();
+        self.paint_glyph_with_raster_sweep(origin, font_id, glyph_id, font_size, color, None)
+    }
 
+    pub(crate) fn paint_glyph_with_raster_sweep(
+        &mut self,
+        origin: Point<Pixels>,
+        font_id: FontId,
+        glyph_id: GlyphId,
+        font_size: Pixels,
+        color: Hsla,
+        raster_text_sweep: Option<crate::RasterTextSweepPaint>,
+    ) -> Result<()> {
+        self.invalidator.debug_assert_paint();
         let element_opacity = self.element_opacity();
         let scale_factor = self.scale_factor();
         let glyph_origin = origin.scale(scale_factor);
@@ -4356,7 +4367,8 @@ impl Window {
             (quantized_origin.y.fract() * SUBPIXEL_VARIANTS_Y as f32) as u8,
         );
         let integer_origin = quantized_origin.map(|c| ScaledPixels(c.trunc()));
-        let subpixel_rendering = self.should_use_subpixel_rendering(font_id, font_size);
+        let subpixel_rendering =
+            raster_text_sweep.is_none() && self.should_use_subpixel_rendering(font_id, font_size);
         let dilation = self.text_system().glyph_dilation_for_color(color);
         let params = RenderGlyphParams {
             font_id,
@@ -4395,12 +4407,30 @@ impl Window {
                     transformation: TransformationMatrix::unit(),
                 });
             } else {
+                let (active_color, sweep) = raster_text_sweep
+                    .map(|sweep| {
+                        (
+                            sweep.active_color.opacity(element_opacity),
+                            [
+                                sweep.front.0 * scale_factor,
+                                sweep.softness.0 * scale_factor,
+                                sweep.embolden.0 * scale_factor,
+                                sweep.progress,
+                            ],
+                        )
+                    })
+                    .unwrap_or((color.opacity(element_opacity), [0., 0., 0., -1.]));
                 self.next_frame.scene.insert_primitive(MonochromeSprite {
                     order: 0,
                     pad: 0,
                     bounds,
                     content_mask,
                     color: color.opacity(element_opacity),
+                    active_color,
+                    sweep_front: sweep[0],
+                    sweep_softness: sweep[1],
+                    sweep_embolden: sweep[2],
+                    sweep_progress: sweep[3],
                     tile,
                     transformation: TransformationMatrix::unit(),
                 });
@@ -4548,6 +4578,11 @@ impl Window {
             bounds: final_bounds,
             content_mask,
             color: color.opacity(element_opacity),
+            active_color: color.opacity(element_opacity),
+            sweep_front: 0.,
+            sweep_softness: 0.,
+            sweep_embolden: 0.,
+            sweep_progress: -1.,
             tile,
             transformation,
         });

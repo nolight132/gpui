@@ -2947,7 +2947,23 @@ mod tests {
         assert_eq!(std::mem::size_of::<PathRasterizationVertex>(), 26 * 4);
         assert_eq!(std::mem::size_of::<PathSprite>(), 4 * 4);
         assert_eq!(std::mem::size_of::<Underline>(), 16 * 4);
-        assert_eq!(std::mem::size_of::<MonochromeSprite>(), 28 * 4);
+        assert_eq!(std::mem::size_of::<MonochromeSprite>(), 36 * 4);
+        assert_eq!(std::mem::align_of::<MonochromeSprite>(), 4);
+        assert_eq!(std::mem::offset_of!(MonochromeSprite, active_color), 14 * 4);
+        assert_eq!(std::mem::offset_of!(MonochromeSprite, sweep_front), 18 * 4);
+        assert_eq!(
+            std::mem::offset_of!(MonochromeSprite, sweep_softness),
+            19 * 4
+        );
+        assert_eq!(
+            std::mem::offset_of!(MonochromeSprite, sweep_embolden),
+            20 * 4
+        );
+        assert_eq!(
+            std::mem::offset_of!(MonochromeSprite, sweep_progress),
+            21 * 4
+        );
+        assert_eq!(std::mem::offset_of!(MonochromeSprite, tile), 22 * 4);
         assert_eq!(std::mem::size_of::<SubpixelSprite>(), 28 * 4);
         assert_eq!(std::mem::size_of::<PolychromeSprite>(), 24 * 4);
         assert_eq!(std::mem::size_of::<MaskParams>(), 16 * 4);

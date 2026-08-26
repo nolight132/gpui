@@ -421,6 +421,7 @@ impl WindowTextSystem {
                 && last_run.underline == run.underline
                 && last_run.strikethrough == run.strikethrough
                 && last_run.background_color == run.background_color
+                && last_run.raster_text_sweep == run.raster_text_sweep
             {
                 last_run.len += run.len as u32;
                 continue;
@@ -428,6 +429,7 @@ impl WindowTextSystem {
             decoration_runs.push(DecorationRun {
                 len: run.len as u32,
                 color: run.color,
+                raster_text_sweep: run.raster_text_sweep,
                 background_color: run.background_color,
                 underline: run.underline,
                 strikethrough: run.strikethrough,
@@ -469,6 +471,7 @@ impl WindowTextSystem {
                 && last_run.underline == run.underline
                 && last_run.strikethrough == run.strikethrough
                 && last_run.background_color == run.background_color
+                && last_run.raster_text_sweep == run.raster_text_sweep
             {
                 last_run.len += run.len as u32;
                 continue;
@@ -476,6 +479,7 @@ impl WindowTextSystem {
             decoration_runs.push(DecorationRun {
                 len: run.len as u32,
                 color: run.color,
+                raster_text_sweep: run.raster_text_sweep,
                 background_color: run.background_color,
                 underline: run.underline,
                 strikethrough: run.strikethrough,
@@ -542,29 +546,35 @@ impl WindowTextSystem {
 
                 let run_len_within_line = cmp::min(line_end - run_start, run.len);
 
-                let decoration_changed = if let Some(last_run) = decoration_runs.last_mut()
-                    && last_run.color == run.color
-                    && last_run.underline == run.underline
-                    && last_run.strikethrough == run.strikethrough
-                    && last_run.background_color == run.background_color
-                {
-                    last_run.len += run_len_within_line as u32;
-                    false
+                let shape_boundary_changed = decoration_runs.last().is_none_or(|last_run| {
+                    last_run.color != run.color
+                        || last_run.underline != run.underline
+                        || last_run.strikethrough != run.strikethrough
+                        || last_run.background_color != run.background_color
+                });
+                let paint_decoration_changed = decoration_runs.last().is_none_or(|last_run| {
+                    shape_boundary_changed || last_run.raster_text_sweep != run.raster_text_sweep
+                });
+                if !paint_decoration_changed {
+                    decoration_runs
+                        .last_mut()
+                        .expect("a matching decoration run must exist")
+                        .len += run_len_within_line as u32;
                 } else {
                     decoration_runs.push(DecorationRun {
                         len: run_len_within_line as u32,
                         color: run.color,
+                        raster_text_sweep: run.raster_text_sweep,
                         background_color: run.background_color,
                         underline: run.underline,
                         strikethrough: run.strikethrough,
                     });
-                    true
-                };
+                }
 
                 let font_id = self.resolve_font(&run.font);
                 if let Some(font_run) = font_runs.last_mut()
                     && font_id == font_run.font_id
-                    && !decoration_changed
+                    && !shape_boundary_changed
                 {
                     font_run.len += run_len_within_line;
                 } else {
@@ -1019,6 +1029,8 @@ pub struct TextRun {
     pub font: Font,
     /// The color
     pub color: Hsla,
+    /// Paint-only raster color sweep and horizontal emboldening.
+    pub raster_text_sweep: Option<crate::RasterTextSweep>,
     /// The background color (if any)
     pub background_color: Option<Hsla>,
     /// The underline style (if any)

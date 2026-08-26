@@ -1143,6 +1143,11 @@ struct MonochromeSprite {
     Bounds bounds;
     Bounds content_mask;
     Hsla color;
+    Hsla active_color;
+    float sweep_front;
+    float sweep_softness;
+    float sweep_embolden;
+    float sweep_progress;
     AtlasTile tile;
     TransformationMatrix transformation;
 };
@@ -1151,6 +1156,9 @@ struct MonochromeSpriteVertexOutput {
     float4 position: SV_Position;
     float2 tile_position: POSITION;
     nointerpolation float4 color: COLOR;
+    nointerpolation float4 active_color: COLOR1;
+    nointerpolation float4 sweep: TEXCOORD1;
+    nointerpolation float4 tile_bounds: TEXCOORD2;
     float4 clip_distance: SV_ClipDistance;
 };
 
@@ -1158,6 +1166,9 @@ struct MonochromeSpriteFragmentInput {
     float4 position: SV_Position;
     float2 tile_position: POSITION;
     nointerpolation float4 color: COLOR;
+    nointerpolation float4 active_color: COLOR1;
+    nointerpolation float4 sweep: TEXCOORD1;
+    nointerpolation float4 tile_bounds: TEXCOORD2;
     float4 clip_distance: SV_ClipDistance;
 };
 
@@ -1177,14 +1188,42 @@ MonochromeSpriteVertexOutput monochrome_sprite_vertex(uint vertex_id: SV_VertexI
     output.position = device_position;
     output.tile_position = tile_position;
     output.color = color;
+    output.active_color = hsla_to_rgba(sprite.active_color);
+    output.sweep = float4(sprite.sweep_front, sprite.sweep_softness,
+                          sprite.sweep_embolden, sprite.sweep_progress);
+    output.tile_bounds = float4(
+        float2(sprite.tile.bounds.origin.x, sprite.tile.bounds.origin.y) + 0.5,
+        float2(sprite.tile.bounds.origin.x + sprite.tile.bounds.size.width,
+               sprite.tile.bounds.origin.y + sprite.tile.bounds.size.height) - 0.5);
     output.clip_distance = clip_distance;
     return output;
 }
 
 float4 monochrome_sprite_fragment(MonochromeSpriteFragmentInput input): SV_Target {
     float sample = t_sprite.Sample(s_sprite, input.tile_position).r;
-    float alpha_corrected = apply_contrast_and_gamma_correction(sample, input.color.rgb, grayscale_enhanced_contrast, gamma_ratios);
-    return float4(input.color.rgb, input.color.a * alpha_corrected);
+    if (input.sweep.w <= 0.0) {
+        float alpha_corrected = apply_contrast_and_gamma_correction(sample, input.color.rgb, grayscale_enhanced_contrast, gamma_ratios);
+        return float4(input.color.rgb, input.color.a * alpha_corrected);
+    }
+    float transition = 0.0;
+    if (input.sweep.w >= 1.0) {
+        transition = 1.0;
+    } else if (input.sweep.w > 0.0) {
+        transition = 1.0 - smoothstep(input.sweep.x - input.sweep.y, input.sweep.x, input.position.x);
+    }
+    uint atlas_width;
+    uint atlas_height;
+    t_sprite.GetDimensions(atlas_width, atlas_height);
+    float2 atlas_size = float2(atlas_width, atlas_height);
+    float2 tile_min = input.tile_bounds.xy / atlas_size;
+    float2 tile_max = input.tile_bounds.zw / atlas_size;
+    float2 horizontal_step = ddx(input.tile_position) * input.sweep.z;
+    float left = t_sprite.Sample(s_sprite, clamp(input.tile_position - horizontal_step, tile_min, tile_max)).r;
+    float right = t_sprite.Sample(s_sprite, clamp(input.tile_position + horizontal_step, tile_min, tile_max)).r;
+    float coverage = lerp(sample, max(sample, max(left, right)), transition);
+    float4 color = lerp(input.color, input.active_color, transition);
+    float alpha_corrected = apply_contrast_and_gamma_correction(coverage, color.rgb, grayscale_enhanced_contrast, gamma_ratios);
+    return float4(color.rgb, color.a * alpha_corrected);
 }
 
 MonochromeSpriteVertexOutput subpixel_sprite_vertex(uint vertex_id: SV_VertexID, uint instance_id: SV_InstanceID) {

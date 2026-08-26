@@ -567,6 +567,35 @@ pub trait Styled: Sized {
         self
     }
 
+    /// Applies a paint-only color sweep and horizontal optical emboldening to platform-rasterized
+    /// text. Layout, wrapping, and the selected font instance remain unchanged.
+    fn raster_text_sweep(
+        mut self,
+        active_color: Hsla,
+        progress: f32,
+        softness: Pixels,
+        embolden: Pixels,
+    ) -> Self {
+        assert!(
+            progress.is_finite(),
+            "raster text sweep progress must be finite"
+        );
+        assert!(
+            softness.0.is_finite() && softness >= px(0.),
+            "raster text sweep softness must be finite and non-negative"
+        );
+        assert!(
+            embolden.0.is_finite() && embolden >= px(0.),
+            "raster text sweep embolden must be finite and non-negative"
+        );
+        self.text_style().raster_text_sweep = Some(crate::RasterTextSweep {
+            active_color,
+            progress: progress.clamp(0., 1.),
+            softness,
+            embolden,
+        });
+        self
+    }
     /// Sets the background color of this element.
     ///
     /// This value cascades to its child elements.
