@@ -2964,7 +2964,11 @@ mod tests {
             21 * 4
         );
         assert_eq!(std::mem::offset_of!(MonochromeSprite, tile), 22 * 4);
-        assert_eq!(std::mem::size_of::<SubpixelSprite>(), 28 * 4);
+        assert_eq!(std::mem::size_of::<SubpixelSprite>(), 36 * 4);
+        assert_eq!(std::mem::align_of::<SubpixelSprite>(), 4);
+        assert_eq!(std::mem::offset_of!(SubpixelSprite, active_color), 14 * 4);
+        assert_eq!(std::mem::offset_of!(SubpixelSprite, sweep_front), 18 * 4);
+        assert_eq!(std::mem::offset_of!(SubpixelSprite, tile), 22 * 4);
         assert_eq!(std::mem::size_of::<PolychromeSprite>(), 24 * 4);
         assert_eq!(std::mem::size_of::<MaskParams>(), 16 * 4);
         assert_eq!(std::mem::align_of::<MaskParams>(), 8);

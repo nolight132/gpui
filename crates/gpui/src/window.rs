@@ -4367,8 +4367,7 @@ impl Window {
             (quantized_origin.y.fract() * SUBPIXEL_VARIANTS_Y as f32) as u8,
         );
         let integer_origin = quantized_origin.map(|c| ScaledPixels(c.trunc()));
-        let subpixel_rendering =
-            raster_text_sweep.is_none() && self.should_use_subpixel_rendering(font_id, font_size);
+        let subpixel_rendering = self.should_use_subpixel_rendering(font_id, font_size);
         let dilation = self.text_system().glyph_dilation_for_color(color);
         let params = RenderGlyphParams {
             font_id,
@@ -4396,6 +4395,25 @@ impl Window {
             };
             let content_mask = self.snapped_content_mask();
 
+            let (active_color, sweep) = raster_text_sweep
+                .map(|sweep| {
+                    (
+                        sweep.active_color.opacity(element_opacity),
+                        [
+                            sweep.front.0 * scale_factor,
+                            sweep.softness.0 * scale_factor,
+                            sweep.embolden.0 * scale_factor,
+                            sweep.progress,
+                        ],
+                    )
+                })
+                .unwrap_or((color.opacity(element_opacity), [0., 0., 0., -1.]));
+            if raster_text_sweep.is_some() {
+                let horizontal_padding = ScaledPixels(sweep[2].ceil());
+                bounds.origin.x -= horizontal_padding;
+                bounds.size.width += horizontal_padding + horizontal_padding;
+            }
+
             if subpixel_rendering {
                 self.next_frame.scene.insert_primitive(SubpixelSprite {
                     order: 0,
@@ -4403,28 +4421,15 @@ impl Window {
                     bounds,
                     content_mask,
                     color: color.opacity(element_opacity),
+                    active_color,
+                    sweep_front: sweep[0],
+                    sweep_softness: sweep[1],
+                    sweep_embolden: sweep[2],
+                    sweep_progress: sweep[3],
                     tile,
                     transformation: TransformationMatrix::unit(),
                 });
             } else {
-                let (active_color, sweep) = raster_text_sweep
-                    .map(|sweep| {
-                        (
-                            sweep.active_color.opacity(element_opacity),
-                            [
-                                sweep.front.0 * scale_factor,
-                                sweep.softness.0 * scale_factor,
-                                sweep.embolden.0 * scale_factor,
-                                sweep.progress,
-                            ],
-                        )
-                    })
-                    .unwrap_or((color.opacity(element_opacity), [0., 0., 0., -1.]));
-                if raster_text_sweep.is_some() {
-                    let horizontal_padding = ScaledPixels(sweep[2].ceil());
-                    bounds.origin.x -= horizontal_padding;
-                    bounds.size.width += horizontal_padding + horizontal_padding;
-                }
                 self.next_frame.scene.insert_primitive(MonochromeSprite {
                     order: 0,
                     pad: 0,

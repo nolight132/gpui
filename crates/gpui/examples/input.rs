@@ -466,6 +466,7 @@ impl Element for TextElement {
             len: display_text.len(),
             font: style.font(),
             color: text_color,
+            raster_text_sweep: None,
             background_color: None,
             underline: None,
             strikethrough: None,
