@@ -1309,7 +1309,13 @@ fn fs_msdf_sprite(input: MsdfSpriteVarying) -> @location(0) vec4<f32> {
     // channel available for future soft effects, but decode the glyph contour from median RGB:
     // substituting alpha around corners turns the sharp MSDF contour into a rounded SDF contour.
     let signed_distance = max(min(sample.r, sample.g), min(max(sample.r, sample.g), sample.b)) - 0.5;
-    let screen_distance = signed_distance * input.distance.x + input.distance.y;
+    // Use the smooth true-distance channel only to recover the contour normal. Weighting the
+    // displacement by its horizontal component expands vertical edges while leaving horizontal
+    // edges in place, so animated emboldening changes glyph width without changing its height.
+    let true_signed_distance = sample.a - 0.5;
+    let screen_gradient = vec2<f32>(dpdx(true_signed_distance), dpdy(true_signed_distance));
+    let horizontal_normal_share = abs(screen_gradient.x) / max(length(screen_gradient), 0.0001);
+    let screen_distance = signed_distance * input.distance.x + input.distance.y * horizontal_normal_share;
     // Derive the output scale from linear em coordinates instead of the sampled MSDF value.
     // fwidth(signed_distance) spikes where the median changes channels at a corner, widening AA
     // into an otherwise opaque stroke. Coordinate derivatives stay smooth across those corners

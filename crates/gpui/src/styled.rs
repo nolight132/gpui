@@ -575,7 +575,7 @@ pub trait Styled: Sized {
         self
     }
 
-    /// Sets paint-only optical emboldening for MSDF text.
+    /// Sets paint-only horizontal optical emboldening for MSDF text.
     ///
     /// This does not change shaping, advances, wrapping, or the selected `FontId`. It has no
     /// effect unless the glyph render mode is [`GlyphRenderMode::Msdf`].
@@ -585,7 +585,7 @@ pub trait Styled: Sized {
         self
     }
 
-    /// Enables MSDF text and sets its paint-only optical emboldening.
+    /// Enables MSDF text and sets its paint-only horizontal optical emboldening.
     ///
     /// Calling this with zero still selects the MSDF path, avoiding a raster/MSDF switch at the
     /// beginning of an animation.

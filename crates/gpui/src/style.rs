@@ -446,7 +446,8 @@ pub enum GlyphRenderMode {
     PlatformRaster,
     /// Use a multi-channel signed distance field when the active backend supports it.
     ///
-    /// This is optical shader-based emboldening, not interpolation of an OpenType `wght` axis.
+    /// This is horizontal optical shader-based emboldening, not interpolation of an OpenType
+    /// `wght` axis.
     Msdf,
 }
 
@@ -511,7 +512,7 @@ pub struct TextStyle {
     /// The glyph rendering path used for non-emoji text.
     pub glyph_render_mode: GlyphRenderMode,
 
-    /// Paint-only optical emboldening for MSDF glyphs.
+    /// Paint-only horizontal optical emboldening for MSDF glyphs.
     pub text_embolden: Pixels,
 
     /// The background color of the text
@@ -654,7 +655,7 @@ pub struct HighlightStyle {
     /// The glyph rendering path.
     pub glyph_render_mode: Option<GlyphRenderMode>,
 
-    /// Paint-only optical emboldening for MSDF glyphs.
+    /// Paint-only horizontal optical emboldening for MSDF glyphs.
     pub text_embolden: Option<Pixels>,
 
     /// The background color of the text

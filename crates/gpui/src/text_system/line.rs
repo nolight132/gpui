@@ -31,7 +31,7 @@ pub struct DecorationRun {
     /// The paint-time glyph rendering path.
     pub glyph_render_mode: GlyphRenderMode,
 
-    /// Paint-only optical emboldening for MSDF glyphs.
+    /// Paint-only horizontal optical emboldening for MSDF glyphs.
     pub text_embolden: Pixels,
 
     /// The background color for this run

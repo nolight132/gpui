@@ -1239,7 +1239,14 @@ float4 msdf_sprite_fragment(MsdfSpriteVertexOutput input): SV_Target {
     float4 sample = t_sprite.Sample(s_sprite, input.tile_position);
     float signed_distance =
         max(min(sample.r, sample.g), min(max(sample.r, sample.g), sample.b)) - 0.5;
-    float screen_distance = signed_distance * input.distance.x + input.distance.y;
+    // The alpha true-distance channel supplies a stable contour normal. Its horizontal component
+    // makes emboldening widen the glyph without moving its top and bottom edges.
+    float true_signed_distance = sample.a - 0.5;
+    float2 screen_gradient = float2(ddx(true_signed_distance), ddy(true_signed_distance));
+    float horizontal_normal_share =
+        abs(screen_gradient.x) / max(length(screen_gradient), 0.0001);
+    float screen_distance =
+        signed_distance * input.distance.x + input.distance.y * horizontal_normal_share;
     float inverse_screen_scale = 0.5 * input.distance.x *
         (length(ddx(input.field_position)) + length(ddy(input.field_position)));
     float antialias_width = clamp(inverse_screen_scale, 0.0001, 1.0);

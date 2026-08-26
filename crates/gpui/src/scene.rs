@@ -1250,7 +1250,8 @@ pub struct MonochromeSprite {
 /// A glyph backed by an RGBA MTSDF atlas tile.
 ///
 /// The field is decoded in linear space. `distance_scale` converts its em-normalized signed
-/// distance to device pixels, while `embolden` moves the zero contour without changing layout.
+/// distance to device pixels, while `embolden` moves the zero contour horizontally without
+/// changing layout or glyph height.
 #[derive(Copy, Clone, Debug)]
 #[repr(C)]
 #[expect(missing_docs)]
