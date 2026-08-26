@@ -1246,21 +1246,41 @@ fn vs_mono_sprite(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index
     var out = MonoSpriteVarying();
     out.position = to_device_position_transformed(unit_vertex, sprite.bounds, sprite.transformation);
 
-    out.tile_position = to_tile_position(unit_vertex, sprite.tile);
     out.color = hsla_to_rgba(sprite.color);
     out.active_color = hsla_to_rgba(sprite.active_color);
     out.sweep = vec4<f32>(sprite.sweep_front, sprite.sweep_softness, sprite.sweep_embolden, sprite.sweep_progress);
     let atlas_size = vec2<f32>(textureDimensions(t_sprite, 0));
-    let tile_min = (vec2<f32>(sprite.tile.bounds.origin) + vec2<f32>(0.5)) / atlas_size;
-    let tile_max = (vec2<f32>(sprite.tile.bounds.origin + sprite.tile.bounds.size) - vec2<f32>(0.5)) / atlas_size;
+    let tile_origin = vec2<f32>(sprite.tile.bounds.origin);
+    let tile_size = vec2<f32>(sprite.tile.bounds.size);
+    let horizontal_padding = select(0.0, ceil(max(sprite.sweep_embolden, 0.0)), sprite.sweep_progress >= 0.0);
+    let padded_origin = tile_origin - vec2<f32>(horizontal_padding, 0.0);
+    let padded_size = tile_size + vec2<f32>(2.0 * horizontal_padding, 0.0);
+    out.tile_position = (padded_origin + unit_vertex * padded_size) / atlas_size;
+    let tile_min = tile_origin / atlas_size;
+    let tile_max = (tile_origin + tile_size) / atlas_size;
     out.tile_bounds = vec4<f32>(tile_min, tile_max);
     out.clip_distances = distance_from_clip_rect_transformed(unit_vertex, sprite.bounds, sprite.content_mask, sprite.transformation);
     return out;
 }
 
+fn sample_mono_tile(position: vec2<f32>, tile_bounds: vec4<f32>) -> f32 {
+    let inside = all(position >= tile_bounds.xy) && all(position <= tile_bounds.zw);
+    let half_texel = vec2<f32>(0.5) / vec2<f32>(textureDimensions(t_sprite, 0));
+    let safe_position = clamp(position, tile_bounds.xy + half_texel, tile_bounds.zw - half_texel);
+    return select(0.0, textureSample(t_sprite, s_sprite, safe_position).r, inside);
+}
+
 @fragment
 fn fs_mono_sprite(input: MonoSpriteVarying) -> @location(0) vec4<f32> {
-    let sample = textureSample(t_sprite, s_sprite, input.tile_position).r;
+    if (input.sweep.w < 0.0) {
+        let sample = textureSample(t_sprite, s_sprite, input.tile_position).r;
+        let alpha_corrected = apply_contrast_and_gamma_correction(sample, input.color.rgb, gamma_params.grayscale_enhanced_contrast, gamma_params.gamma_ratios);
+        if (any(input.clip_distances < vec4<f32>(0.0))) {
+            return vec4<f32>(0.0);
+        }
+        return blend_color(input.color, alpha_corrected);
+    }
+    let sample = sample_mono_tile(input.tile_position, input.tile_bounds);
     if (input.sweep.w <= 0.0) {
         let alpha_corrected = apply_contrast_and_gamma_correction(sample, input.color.rgb, gamma_params.grayscale_enhanced_contrast, gamma_params.gamma_ratios);
         if (any(input.clip_distances < vec4<f32>(0.0))) {
@@ -1275,8 +1295,8 @@ fn fs_mono_sprite(input: MonoSpriteVarying) -> @location(0) vec4<f32> {
         transition = 1.0 - smoothstep(input.sweep.x - input.sweep.y, input.sweep.x, input.position.x);
     }
     let horizontal_step = dpdx(input.tile_position) * input.sweep.z;
-    let left = textureSample(t_sprite, s_sprite, clamp(input.tile_position - horizontal_step, input.tile_bounds.xy, input.tile_bounds.zw)).r;
-    let right = textureSample(t_sprite, s_sprite, clamp(input.tile_position + horizontal_step, input.tile_bounds.xy, input.tile_bounds.zw)).r;
+    let left = sample_mono_tile(input.tile_position - horizontal_step, input.tile_bounds);
+    let right = sample_mono_tile(input.tile_position + horizontal_step, input.tile_bounds);
     let coverage = mix(sample, max(sample, max(left, right)), transition);
     let color = mix(input.color, input.active_color, transition);
     let alpha_corrected = apply_contrast_and_gamma_correction(coverage, color.rgb, gamma_params.grayscale_enhanced_contrast, gamma_params.gamma_ratios);

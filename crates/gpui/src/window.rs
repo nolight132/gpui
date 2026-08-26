@@ -4390,7 +4390,7 @@ impl Window {
                     Ok(Some((size, Cow::Owned(bytes))))
                 })?
                 .expect("Callback above only errors or returns Some");
-            let bounds = Bounds {
+            let mut bounds = Bounds {
                 origin: integer_origin + raster_bounds.origin.map(Into::into),
                 size: tile.bounds.size.map(Into::into),
             };
@@ -4420,6 +4420,11 @@ impl Window {
                         )
                     })
                     .unwrap_or((color.opacity(element_opacity), [0., 0., 0., -1.]));
+                if raster_text_sweep.is_some() {
+                    let horizontal_padding = ScaledPixels(sweep[2].ceil());
+                    bounds.origin.x -= horizontal_padding;
+                    bounds.size.width += horizontal_padding + horizontal_padding;
+                }
                 self.next_frame.scene.insert_primitive(MonochromeSprite {
                     order: 0,
                     pad: 0,

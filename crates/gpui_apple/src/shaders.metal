@@ -652,14 +652,19 @@ vertex MonochromeSpriteVertexOutput monochrome_sprite_vertex(
       to_device_position_transformed(unit_vertex, sprite.bounds, sprite.transformation, viewport_size);
   float4 clip_distance = distance_from_clip_rect_transformed(unit_vertex, sprite.bounds,
                                                  sprite.content_mask.bounds, sprite.transformation);
-  float2 tile_position = to_tile_position(unit_vertex, sprite.tile, atlas_size);
   float4 color = hsla_to_rgba(sprite.color);
   float4 active_color = hsla_to_rgba(sprite.active_color);
-  float2 tile_min = (float2(sprite.tile.bounds.origin.x, sprite.tile.bounds.origin.y) + 0.5) /
-                    float2(atlas_size->width, atlas_size->height);
-  float2 tile_max = (float2(sprite.tile.bounds.origin.x + sprite.tile.bounds.size.width,
-                            sprite.tile.bounds.origin.y + sprite.tile.bounds.size.height) - 0.5) /
-                    float2(atlas_size->width, atlas_size->height);
+  float2 atlas_dimensions = float2(atlas_size->width, atlas_size->height);
+  float2 tile_origin = float2(sprite.tile.bounds.origin.x, sprite.tile.bounds.origin.y);
+  float2 tile_size = float2(sprite.tile.bounds.size.width, sprite.tile.bounds.size.height);
+  float horizontal_padding = sprite.sweep_progress >= 0.0
+      ? ceil(max(sprite.sweep_embolden, 0.0))
+      : 0.0;
+  float2 padded_origin = tile_origin - float2(horizontal_padding, 0.0);
+  float2 padded_size = tile_size + float2(2.0 * horizontal_padding, 0.0);
+  float2 tile_position = (padded_origin + unit_vertex * padded_size) / atlas_dimensions;
+  float2 tile_min = tile_origin / atlas_dimensions;
+  float2 tile_max = (tile_origin + tile_size) / atlas_dimensions;
   return MonochromeSpriteVertexOutput{
       device_position,
       tile_position,
@@ -669,6 +674,15 @@ vertex MonochromeSpriteVertexOutput monochrome_sprite_vertex(
              sprite.sweep_embolden, sprite.sweep_progress),
       float4(tile_min, tile_max),
       {clip_distance.x, clip_distance.y, clip_distance.z, clip_distance.w}};
+}
+
+float sample_mono_tile(texture2d<float> texture, sampler texture_sampler,
+                       float2 position, float4 tile_bounds) {
+  bool inside = all(position >= tile_bounds.xy) && all(position <= tile_bounds.zw);
+  float2 half_texel = 0.5 / float2(texture.get_width(), texture.get_height());
+  float2 safe_position = clamp(position, tile_bounds.xy + half_texel,
+                               tile_bounds.zw - half_texel);
+  return inside ? texture.sample(texture_sampler, safe_position).a : 0.0;
 }
 
 fragment float4 monochrome_sprite_fragment(
@@ -681,7 +695,14 @@ fragment float4 monochrome_sprite_fragment(
 
   constexpr sampler atlas_texture_sampler(mag_filter::linear,
                                           min_filter::linear);
-  float sample = atlas_texture.sample(atlas_texture_sampler, input.tile_position).a;
+  if (input.sweep.w < 0.0) {
+    float sample = atlas_texture.sample(atlas_texture_sampler, input.tile_position).a;
+    float4 color = input.color;
+    color.a *= sample;
+    return color;
+  }
+  float sample = sample_mono_tile(atlas_texture, atlas_texture_sampler,
+                                  input.tile_position, input.tile_bounds);
   if (input.sweep.w <= 0.0) {
     float4 color = input.color;
     color.a *= sample;
@@ -694,10 +715,10 @@ fragment float4 monochrome_sprite_fragment(
     transition = 1.0 - smoothstep(input.sweep.x - input.sweep.y, input.sweep.x, input.position.x);
   }
   float2 horizontal_step = dfdx(input.tile_position) * input.sweep.z;
-  float left = atlas_texture.sample(atlas_texture_sampler,
-      clamp(input.tile_position - horizontal_step, input.tile_bounds.xy, input.tile_bounds.zw)).a;
-  float right = atlas_texture.sample(atlas_texture_sampler,
-      clamp(input.tile_position + horizontal_step, input.tile_bounds.xy, input.tile_bounds.zw)).a;
+  float left = sample_mono_tile(atlas_texture, atlas_texture_sampler,
+                                input.tile_position - horizontal_step, input.tile_bounds);
+  float right = sample_mono_tile(atlas_texture, atlas_texture_sampler,
+                                 input.tile_position + horizontal_step, input.tile_bounds);
   float coverage = mix(sample, max(sample, max(left, right)), transition);
   float4 color = mix(input.color, input.active_color, transition);
   color.a *= coverage;
