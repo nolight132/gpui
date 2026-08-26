@@ -1089,7 +1089,7 @@ pub struct TextRun {
     pub color: Hsla,
     /// The glyph rendering path. This does not participate in font resolution or shaping.
     pub glyph_render_mode: crate::GlyphRenderMode,
-    /// Paint-only horizontal optical emboldening for MSDF glyphs.
+    /// Paint-only optical emboldening for MSDF glyphs.
     pub text_embolden: Pixels,
     /// The background color (if any)
     pub background_color: Option<Hsla>,

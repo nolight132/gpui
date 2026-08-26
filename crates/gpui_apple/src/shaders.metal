@@ -677,6 +677,7 @@ struct MsdfSpriteVertexOutput {
   float2 tile_position;
   float4 color [[flat]];
   float2 distance [[flat]];
+  uint horizontal_embolden [[flat]];
   float4 clip_distance;
   float2 field_position;
 };
@@ -707,6 +708,7 @@ vertex MsdfSpriteVertexOutput msdf_sprite_vertex(
       tile_position,
       hsla_to_rgba(sprite.color),
       float2(sprite.distance_scale, sprite.embolden),
+      sprite.horizontal_embolden,
       clip_distance,
       field_position};
 }
@@ -724,8 +726,9 @@ fragment float4 msdf_sprite_fragment(
   float2 screen_gradient = float2(dfdx(true_signed_distance), dfdy(true_signed_distance));
   float horizontal_normal_share =
       abs(screen_gradient.x) / max(length(screen_gradient), 0.0001);
+  float embolden_share = input.horizontal_embolden != 0 ? horizontal_normal_share : 1.0;
   float screen_distance =
-      signed_distance * input.distance.x + input.distance.y * horizontal_normal_share;
+      signed_distance * input.distance.x + input.distance.y * embolden_share;
   float inverse_screen_scale = 0.5 * input.distance.x *
       (length(dfdx(input.field_position)) + length(dfdy(input.field_position)));
   float antialias_width = clamp(inverse_screen_scale, 0.0001, 1.0);

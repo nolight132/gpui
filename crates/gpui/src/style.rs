@@ -446,9 +446,13 @@ pub enum GlyphRenderMode {
     PlatformRaster,
     /// Use a multi-channel signed distance field when the active backend supports it.
     ///
-    /// This is horizontal optical shader-based emboldening, not interpolation of an OpenType
-    /// `wght` axis.
+    /// Optical emboldening is applied uniformly around the contour. It is not interpolation of an
+    /// OpenType `wght` axis.
     Msdf,
+    /// Use a multi-channel signed distance field with horizontal-only optical emboldening.
+    ///
+    /// This leaves the top and bottom of the glyph stationary while moving its side contours.
+    MsdfHorizontal,
 }
 
 /// Effects applied to an element and its subtree as a whole, the way CSS filters work.
@@ -512,7 +516,7 @@ pub struct TextStyle {
     /// The glyph rendering path used for non-emoji text.
     pub glyph_render_mode: GlyphRenderMode,
 
-    /// Paint-only horizontal optical emboldening for MSDF glyphs.
+    /// Paint-only optical emboldening for MSDF glyphs.
     pub text_embolden: Pixels,
 
     /// The background color of the text
@@ -655,7 +659,7 @@ pub struct HighlightStyle {
     /// The glyph rendering path.
     pub glyph_render_mode: Option<GlyphRenderMode>,
 
-    /// Paint-only horizontal optical emboldening for MSDF glyphs.
+    /// Paint-only optical emboldening for MSDF glyphs.
     pub text_embolden: Option<Pixels>,
 
     /// The background color of the text
@@ -1467,6 +1471,16 @@ mod tests {
             Some(GlyphRenderMode::Msdf)
         );
         assert_eq!(refinement.text.text_embolden, Some(px(0.0)));
+    }
+
+    #[test]
+    fn horizontal_embolden_selects_horizontal_msdf_rendering() {
+        let refinement = StyleRefinement::default().msdf_text_horizontal(px(1.0));
+        assert_eq!(
+            refinement.text.glyph_render_mode,
+            Some(GlyphRenderMode::MsdfHorizontal)
+        );
+        assert_eq!(refinement.text.text_embolden, Some(px(1.0)));
     }
 
     #[perf]

@@ -1197,7 +1197,8 @@ struct MsdfSprite {
     TransformationMatrix transformation;
     float distance_scale;
     float embolden;
-    uint2 abi_padding;
+    uint horizontal_embolden;
+    uint abi_padding;
 };
 
 struct MsdfSpriteVertexOutput {
@@ -1207,6 +1208,7 @@ struct MsdfSpriteVertexOutput {
     nointerpolation float2 distance: TEXCOORD0;
     float4 clip_distance: TEXCOORD1;
     float2 field_position: TEXCOORD2;
+    nointerpolation uint horizontal_embolden: TEXCOORD3;
 };
 
 StructuredBuffer<MsdfSprite> msdf_sprites: register(t1);
@@ -1232,6 +1234,7 @@ MsdfSpriteVertexOutput msdf_sprite_vertex(uint vertex_id: SV_VertexID, uint inst
     output.clip_distance = distance_from_clip_rect_transformed(
         unit_vertex, sprite.bounds, sprite.content_mask, sprite.transformation);
     output.field_position = unit_vertex * sprite.bounds.size / sprite.distance_scale;
+    output.horizontal_embolden = sprite.horizontal_embolden;
     return output;
 }
 
@@ -1245,8 +1248,9 @@ float4 msdf_sprite_fragment(MsdfSpriteVertexOutput input): SV_Target {
     float2 screen_gradient = float2(ddx(true_signed_distance), ddy(true_signed_distance));
     float horizontal_normal_share =
         abs(screen_gradient.x) / max(length(screen_gradient), 0.0001);
+    float embolden_share = input.horizontal_embolden != 0 ? horizontal_normal_share : 1.0;
     float screen_distance =
-        signed_distance * input.distance.x + input.distance.y * horizontal_normal_share;
+        signed_distance * input.distance.x + input.distance.y * embolden_share;
     float inverse_screen_scale = 0.5 * input.distance.x *
         (length(ddx(input.field_position)) + length(ddy(input.field_position)));
     float antialias_width = clamp(inverse_screen_scale, 0.0001, 1.0);

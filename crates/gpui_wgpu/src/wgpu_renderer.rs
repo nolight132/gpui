@@ -2983,7 +2983,11 @@ mod tests {
         assert_eq!(std::mem::align_of::<MsdfSprite>(), 4);
         assert_eq!(std::mem::offset_of!(MsdfSprite, distance_scale), 28 * 4);
         assert_eq!(std::mem::offset_of!(MsdfSprite, embolden), 29 * 4);
-        assert_eq!(std::mem::offset_of!(MsdfSprite, abi_padding), 30 * 4);
+        assert_eq!(
+            std::mem::offset_of!(MsdfSprite, horizontal_embolden),
+            30 * 4
+        );
+        assert_eq!(std::mem::offset_of!(MsdfSprite, abi_padding), 31 * 4);
         assert_eq!(std::mem::size_of::<SubpixelSprite>(), 28 * 4);
         assert_eq!(std::mem::size_of::<PolychromeSprite>(), 24 * 4);
         assert_eq!(std::mem::size_of::<MaskParams>(), 16 * 4);

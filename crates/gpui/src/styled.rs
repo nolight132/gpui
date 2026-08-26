@@ -575,7 +575,7 @@ pub trait Styled: Sized {
         self
     }
 
-    /// Sets paint-only horizontal optical emboldening for MSDF text.
+    /// Sets paint-only optical emboldening for MSDF text.
     ///
     /// This does not change shaping, advances, wrapping, or the selected `FontId`. It has no
     /// effect unless the glyph render mode is [`GlyphRenderMode::Msdf`].
@@ -585,7 +585,7 @@ pub trait Styled: Sized {
         self
     }
 
-    /// Enables MSDF text and sets its paint-only horizontal optical emboldening.
+    /// Enables MSDF text and sets its paint-only uniform optical emboldening.
     ///
     /// Calling this with zero still selects the MSDF path, avoiding a raster/MSDF switch at the
     /// beginning of an animation.
@@ -593,6 +593,18 @@ pub trait Styled: Sized {
         assert!(embolden.0.is_finite(), "MSDF text embolden must be finite");
         let style = self.text_style();
         style.glyph_render_mode = Some(GlyphRenderMode::Msdf);
+        style.text_embolden = Some(embolden);
+        self
+    }
+
+    /// Enables MSDF text and sets paint-only horizontal optical emboldening.
+    ///
+    /// Calling this with zero still selects the MSDF path. The glyph's side contours move while
+    /// its top and bottom contours remain stationary.
+    fn msdf_text_horizontal(mut self, embolden: Pixels) -> Self {
+        assert!(embolden.0.is_finite(), "MSDF text embolden must be finite");
+        let style = self.text_style();
+        style.glyph_render_mode = Some(GlyphRenderMode::MsdfHorizontal);
         style.text_embolden = Some(embolden);
         self
     }

@@ -1269,7 +1269,8 @@ struct MsdfSprite {
     transformation: TransformationMatrix,
     distance_scale: f32,
     embolden: f32,
-    abi_padding: vec2<u32>,
+    horizontal_embolden: u32,
+    abi_padding: u32,
 }
 
 struct MsdfSpriteVarying {
@@ -1279,6 +1280,7 @@ struct MsdfSpriteVarying {
     @location(2) @interpolate(flat) distance: vec2<f32>,
     @location(3) clip_distances: vec4<f32>,
     @location(4) field_position: vec2<f32>,
+    @location(5) @interpolate(flat) horizontal_embolden: u32,
 }
 
 @vertex
@@ -1297,6 +1299,7 @@ fn vs_msdf_sprite(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index
     out.distance = vec2<f32>(sprite.distance_scale, sprite.embolden);
     out.clip_distances = distance_from_clip_rect_transformed(unit_vertex, sprite.bounds, sprite.content_mask, sprite.transformation);
     out.field_position = unit_vertex * vec2<f32>(sprite.bounds.size) / sprite.distance_scale;
+    out.horizontal_embolden = sprite.horizontal_embolden;
     return out;
 }
 
@@ -1315,7 +1318,8 @@ fn fs_msdf_sprite(input: MsdfSpriteVarying) -> @location(0) vec4<f32> {
     let true_signed_distance = sample.a - 0.5;
     let screen_gradient = vec2<f32>(dpdx(true_signed_distance), dpdy(true_signed_distance));
     let horizontal_normal_share = abs(screen_gradient.x) / max(length(screen_gradient), 0.0001);
-    let screen_distance = signed_distance * input.distance.x + input.distance.y * horizontal_normal_share;
+    let embolden_share = select(1.0, horizontal_normal_share, input.horizontal_embolden != 0u);
+    let screen_distance = signed_distance * input.distance.x + input.distance.y * embolden_share;
     // Derive the output scale from linear em coordinates instead of the sampled MSDF value.
     // fwidth(signed_distance) spikes where the median changes channels at a corner, widening AA
     // into an otherwise opaque stroke. Coordinate derivatives stay smooth across those corners

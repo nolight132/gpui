@@ -4364,10 +4364,20 @@ impl Window {
         self.invalidator.debug_assert_paint();
 
         let scale_factor = self.scale_factor();
-        if glyph_render_mode == GlyphRenderMode::Msdf
-            && font_size.0 * scale_factor >= MIN_MSDF_DEVICE_FONT_SIZE
+        if matches!(
+            glyph_render_mode,
+            GlyphRenderMode::Msdf | GlyphRenderMode::MsdfHorizontal
+        ) && font_size.0 * scale_factor >= MIN_MSDF_DEVICE_FONT_SIZE
             && self.text_system().supports_msdf()
-            && self.paint_msdf_glyph(origin, font_id, glyph_id, font_size, color, text_embolden)?
+            && self.paint_msdf_glyph(
+                origin,
+                font_id,
+                glyph_id,
+                font_size,
+                color,
+                text_embolden,
+                glyph_render_mode == GlyphRenderMode::MsdfHorizontal,
+            )?
         {
             return Ok(());
         }
@@ -4449,6 +4459,7 @@ impl Window {
         font_size: Pixels,
         color: Hsla,
         text_embolden: Pixels,
+        horizontal_embolden: bool,
     ) -> Result<bool> {
         let params = MsdfGlyphParams::new(font_id, glyph_id);
         let Some(info) = self.text_system().msdf_glyph_info(&params)? else {
@@ -4494,7 +4505,8 @@ impl Window {
             transformation: TransformationMatrix::unit(),
             distance_scale,
             embolden,
-            abi_padding: [0; 2],
+            horizontal_embolden: horizontal_embolden.into(),
+            abi_padding: 0,
         });
         Ok(true)
     }

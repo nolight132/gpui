@@ -1250,8 +1250,8 @@ pub struct MonochromeSprite {
 /// A glyph backed by an RGBA MTSDF atlas tile.
 ///
 /// The field is decoded in linear space. `distance_scale` converts its em-normalized signed
-/// distance to device pixels, while `embolden` moves the zero contour horizontally without
-/// changing layout or glyph height.
+/// distance to device pixels, while `embolden` moves the zero contour without changing layout.
+/// `horizontal_embolden` limits that displacement to the glyph's side contours.
 #[derive(Copy, Clone, Debug)]
 #[repr(C)]
 #[expect(missing_docs)]
@@ -1265,7 +1265,8 @@ pub struct MsdfSprite {
     pub transformation: TransformationMatrix,
     pub distance_scale: f32,
     pub embolden: f32,
-    pub abi_padding: [u32; 2],
+    pub horizontal_embolden: u32,
+    pub abi_padding: u32,
 }
 
 #[cfg(test)]
@@ -1278,7 +1279,11 @@ mod msdf_sprite_tests {
         assert_eq!(std::mem::align_of::<MsdfSprite>(), 4);
         assert_eq!(std::mem::offset_of!(MsdfSprite, distance_scale), 28 * 4);
         assert_eq!(std::mem::offset_of!(MsdfSprite, embolden), 29 * 4);
-        assert_eq!(std::mem::offset_of!(MsdfSprite, abi_padding), 30 * 4);
+        assert_eq!(
+            std::mem::offset_of!(MsdfSprite, horizontal_embolden),
+            30 * 4
+        );
+        assert_eq!(std::mem::offset_of!(MsdfSprite, abi_padding), 31 * 4);
     }
 }
 
