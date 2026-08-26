@@ -730,7 +730,7 @@ fragment float4 msdf_sprite_fragment(
       max(length(true_distance_gradient), 0.0001);
   float horizontal_weight = smoothstep(0.75, 0.95, horizontal_alignment);
   float screen_distance = signed_distance * input.distance.x + input.distance.y;
-  if (input.horizontal_embolden != 0) {
+  if (input.horizontal_embolden != 0 && abs(input.distance.y) > 0.0001) {
     float2 left_position = clamp(
         input.tile_position - horizontal_step, input.tile_bounds.xy, input.tile_bounds.zw);
     float2 right_position = clamp(

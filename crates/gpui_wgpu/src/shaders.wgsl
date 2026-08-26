@@ -1328,7 +1328,7 @@ fn fs_msdf_sprite(input: MsdfSpriteVarying) -> @location(0) vec4<f32> {
         max(length(true_distance_gradient), 0.0001);
     let horizontal_weight = smoothstep(0.75, 0.95, horizontal_alignment);
     var screen_distance = signed_distance * input.distance.x + input.distance.y;
-    if (input.horizontal_embolden != 0u) {
+    if (input.horizontal_embolden != 0u && abs(input.distance.y) > 0.0001) {
         let left_position = clamp(
             input.tile_position - horizontal_step,
             input.tile_bounds.xy,
