@@ -57,6 +57,8 @@ pub(crate) struct EntityMap {
     entities: SecondaryMap<EntityId, Box<dyn Any>>,
     pub accessed_entities: RefCell<FxHashSet<EntityId>>,
     ref_counts: Arc<RwLock<EntityRefCounts>>,
+    #[cfg(feature = "profiler")]
+    names: SecondaryMap<EntityId, &'static str>,
 }
 
 #[doc(hidden)]
@@ -71,6 +73,8 @@ impl EntityMap {
     pub fn new() -> Self {
         Self {
             entities: SecondaryMap::new(),
+            #[cfg(feature = "profiler")]
+            names: SecondaryMap::new(),
             accessed_entities: RefCell::new(FxHashSet::default()),
             ref_counts: Arc::new(RwLock::new(EntityRefCounts {
                 counts: SlotMap::with_key(),
@@ -125,8 +129,16 @@ impl EntityMap {
         accessed_entities.insert(slot.entity_id);
 
         let handle = slot.0;
+        #[cfg(feature = "profiler")]
+        self.names.insert(handle.entity_id, type_name::<T>());
         self.entities.insert(handle.entity_id, Box::new(entity));
         handle
+    }
+
+    /// The type an entity was created as, for profiler readouts.
+    #[cfg(feature = "profiler")]
+    pub fn name(&self, id: EntityId) -> &'static str {
+        self.names.get(id).copied().unwrap_or("?")
     }
 
     /// Move an entity to the stack.

@@ -373,6 +373,7 @@ impl<V: View> Element for ViewElement<V> {
             window.set_view_id(entity_id);
             window.with_rendered_view(entity_id, |window| {
                 if let Some(mut element) = element.take() {
+                    window.note_notified(entity_id, bounds);
                     element.prepaint(window, cx);
                     return Some(element);
                 }
@@ -391,6 +392,7 @@ impl<V: View> Element for ViewElement<V> {
                             && !window.refreshing
                         {
                             let prepaint_start = window.prepaint_index();
+                            window.note_view_cache(true);
                             window.reuse_prepaint(element_state.prepaint_range.clone());
                             cx.entities
                                 .extend_accessed(&element_state.accessed_entities);
@@ -400,6 +402,9 @@ impl<V: View> Element for ViewElement<V> {
                             return (None, element_state);
                         }
 
+                        window.note_view_cache(false);
+                        window.note_notified(entity_id, bounds);
+                        window.note_repaint(entity_id, bounds);
                         let refreshing = mem::replace(&mut window.refreshing, true);
                         let prepaint_start = window.prepaint_index();
                         let (mut element, accessed_entities) = cx.detect_accessed_entities(|cx| {

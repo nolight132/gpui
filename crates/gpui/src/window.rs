@@ -242,6 +242,11 @@ impl WindowInvalidator {
         self.inner.borrow_mut().draw_phase = phase
     }
 
+    #[cfg(feature = "profiler")]
+    pub fn phase(&self) -> DrawPhase {
+        self.inner.borrow().draw_phase
+    }
+
     pub fn update_count(&self) -> usize {
         self.inner.borrow().update_count
     }
@@ -1944,6 +1949,10 @@ impl ContentMask<Pixels> {
 
 impl Window {
     fn mark_view_dirty(&mut self, view_id: EntityId) {
+        // The view named here is the one that changed; everything above it is
+        // only dragged along, which is what the repaint wash wants to tell apart.
+        #[cfg(feature = "profiler")]
+        self.debug_frame_overlay.note_notified(view_id);
         // Mark ancestor views as dirty. If already in the `dirty_views` set, then all its ancestors
         // should already be dirty.
         for view_id in self
@@ -2969,8 +2978,28 @@ impl Window {
         debug_assert!(self.rendered_entity_stack.is_empty());
         self.record_entities_accessed(cx);
         self.reset_cursor_style(cx);
+        #[cfg(feature = "profiler")]
+        if let Some(tally) = self.debug_frame_overlay.take_tally() {
+            let named = tally
+                .iter()
+                .take(12)
+                .map(|(id, count)| {
+                    let name = cx.entities.name(*id);
+                    let name = name.rsplit("::").next().unwrap_or(name);
+                    format!("{name} {count}")
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            eprintln!("notifies/s: {named}");
+        }
+
         self.refreshing = false;
         self.invalidator.set_phase(DrawPhase::None);
+        // The wash lives in the scene, so it only clears on a later frame.
+        #[cfg(feature = "profiler")]
+        if self.debug_frame_overlay.wants_frame() {
+            self.invalidator.set_dirty(true);
+        }
         // Focus listeners may move focus (e.g. a dock forwarding focus to its active
         // panel). `Window::focus` suppresses `refresh` while a draw is in progress, so
         // schedule another frame here to render the new focus state and dispatch the
@@ -3085,7 +3114,70 @@ impl Window {
         self.refresh();
     }
 
+    #[inline]
+    pub(crate) fn note_rendered_view(&mut self) {
+        #[cfg(feature = "profiler")]
+        if self.invalidator.phase() == DrawPhase::Prepaint {
+            self.debug_frame_overlay.note_rendered_view();
+        }
+    }
+
+    #[inline]
+    pub(crate) fn note_view_cache(&mut self, reused: bool) {
+        #[cfg(feature = "profiler")]
+        self.debug_frame_overlay.note_view(reused);
+        #[cfg(not(feature = "profiler"))]
+        let _ = reused;
+    }
+
+    /// Washes this view if a notify named it since the last frame.
+    #[inline]
+    pub(crate) fn note_notified(&mut self, view: EntityId, bounds: Bounds<Pixels>) {
+        #[cfg(feature = "profiler")]
+        if self.debug_frame_overlay.was_notified(view) {
+            self.debug_frame_overlay.note_repaint(view, bounds);
+        }
+        #[cfg(not(feature = "profiler"))]
+        let _ = (view, bounds);
+    }
+
+    #[inline]
+    pub(crate) fn note_repaint(&mut self, view: EntityId, bounds: Bounds<Pixels>) {
+        #[cfg(feature = "profiler")]
+        self.debug_frame_overlay.note_repaint(view, bounds);
+        #[cfg(not(feature = "profiler"))]
+        let _ = (view, bounds);
+    }
+
+    /// Whether re-rendered views are being washed for inspection.
+    #[cfg(feature = "profiler")]
+    pub fn show_repaints(&self) -> bool {
+        self.debug_frame_overlay.show_repaints()
+    }
+
+    /// Washes every view that re-renders, so a frame shows what it rebuilt.
+    #[cfg(feature = "profiler")]
+    pub fn set_show_repaints(&mut self, show: bool) {
+        self.debug_frame_overlay.set_show_repaints(show);
+        self.refresh();
+    }
+
+    /// Turns the repaint wash on or off.
+    #[cfg(feature = "profiler")]
+    pub fn toggle_repaints(&mut self) {
+        self.set_show_repaints(!self.show_repaints());
+    }
+
     fn draw_roots(&mut self, cx: &mut App) {
+        #[cfg(feature = "profiler")]
+        {
+            self.debug_frame_overlay.begin_frame();
+            let dirty = self.dirty_views.len() as u32;
+            let refreshing = self.refreshing;
+            self.debug_frame_overlay.note_start(dirty, refreshing);
+        }
+        #[cfg(feature = "profiler")]
+        let phase_start = std::time::Instant::now();
         self.invalidator.set_phase(DrawPhase::Prepaint);
         self.tooltip_bounds.take();
 
@@ -3122,6 +3214,8 @@ impl Window {
             .as_mut()
             .unwrap()
             .stretch_auto_size_to_fill(root_layout_id, root_size, scale_factor);
+        #[cfg(feature = "profiler")]
+        let laid_out = std::time::Instant::now();
         root_element.prepaint_as_root(Point::default(), root_size.into(), self, cx);
 
         #[cfg(any(feature = "inspector", debug_assertions))]
@@ -3155,6 +3249,8 @@ impl Window {
         self.mouse_hit_test = self.next_frame.hit_test(self.mouse_position);
 
         // Now actually paint the elements.
+        #[cfg(feature = "profiler")]
+        let prepainted = std::time::Instant::now();
         self.invalidator.set_phase(DrawPhase::Paint);
         root_element.paint(self, cx);
 
@@ -3169,6 +3265,17 @@ impl Window {
             drag_element.paint(self, cx);
         } else if let Some(mut tooltip_element) = tooltip_element {
             tooltip_element.paint(self, cx);
+        }
+
+        #[cfg(feature = "profiler")]
+        {
+            self.debug_frame_overlay.note_phases(
+                laid_out.duration_since(phase_start),
+                prepainted.duration_since(laid_out),
+                prepainted.elapsed(),
+            );
+            self.debug_frame_overlay.settle_frame();
+            self.debug_frame_overlay.settle_notified();
         }
 
         #[cfg(any(feature = "inspector", debug_assertions))]
@@ -4868,6 +4975,7 @@ impl Window {
         id: EntityId,
         f: impl FnOnce(&mut Self) -> R,
     ) -> R {
+        self.note_rendered_view();
         self.rendered_entity_stack.push(id);
         let result = f(self);
         self.rendered_entity_stack.pop();
