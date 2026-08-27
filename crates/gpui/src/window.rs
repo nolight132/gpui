@@ -1161,6 +1161,7 @@ pub struct Window {
     pub(crate) text_style_stack: Vec<TextStyleRefinement>,
     pub(crate) rendered_entity_stack: Vec<EntityId>,
     pub(crate) element_offset_stack: Vec<Point<Pixels>>,
+    pub(crate) snap_offsets: bool,
     pub(crate) element_opacity: f32,
     pub(crate) content_mask_stack: Vec<ContentMask<Pixels>>,
     pub(crate) requested_autoscroll: Option<Bounds<Pixels>>,
@@ -1853,6 +1854,7 @@ impl Window {
             text_style_stack: Vec::new(),
             rendered_entity_stack: Vec::new(),
             element_offset_stack: Vec::new(),
+            snap_offsets: true,
             content_mask_stack: Vec::new(),
             element_opacity: 1.0,
             requested_autoscroll: None,
@@ -3696,6 +3698,21 @@ impl Window {
         self.with_absolute_element_offset(abs_offset, f)
     }
 
+    /// Lays a subtree out at exactly the offset it was given, instead of rounding that offset to
+    /// the device pixel grid. An element that animates its own position wants this: rounding turns
+    /// a smooth path into whole-pixel steps, so a decelerating one either sits on its last pixel
+    /// for several frames or stops while it is still visibly moving. Text is placed at subpixel
+    /// positions either way; only a quad edge softens. This method should only be called during the
+    /// prepaint phase of element drawing.
+    pub fn with_pixel_snapping<R>(&mut self, snap: bool, f: impl FnOnce(&mut Self) -> R) -> R {
+        self.invalidator.debug_assert_prepaint();
+
+        let was = std::mem::replace(&mut self.snap_offsets, snap);
+        let result = f(self);
+        self.snap_offsets = was;
+        result
+    }
+
     /// Updates the global element offset based on the given offset. This is used to implement
     /// drag handles and other manual painting of elements. This method should only be called during
     /// the prepaint phase of element drawing.
@@ -4906,8 +4923,11 @@ impl Window {
             .unwrap()
             .layout_bounds(layout_id, scale_factor)
             .map(Into::into);
-        let snapped_offset = self.pixel_snap_point(self.element_offset());
-        bounds.origin += snapped_offset;
+        let offset = self.element_offset();
+        bounds.origin += match self.snap_offsets {
+            true => self.pixel_snap_point(offset),
+            false => offset,
+        };
         bounds
     }
 
