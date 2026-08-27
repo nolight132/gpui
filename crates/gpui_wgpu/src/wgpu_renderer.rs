@@ -215,6 +215,7 @@ struct MaskParams {
     source_bounds: [f32; 4],
     fade_bounds: [f32; 4],
     transform_origin: [f32; 2],
+    translation: [f32; 2],
     scale: f32,
     fade_top: f32,
     fade_bottom: f32,
@@ -2010,13 +2011,13 @@ impl WgpuRenderer {
                         .expect("a filtered layer implies its targets");
                     let depth = stack.len();
                     let should_clear =
-                        !cleared[depth] || layer.filter.scales() || transformed_target[depth];
+                        !cleared[depth] || layer.filter.transforms() || transformed_target[depth];
                     let load = match should_clear {
                         true => wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                         false => wgpu::LoadOp::Load,
                     };
                     cleared[depth] = true;
-                    transformed_target[depth] = layer.filter.scales();
+                    transformed_target[depth] = layer.filter.transforms();
 
                     drop(pass);
                     pass = Self::resume_pass(&mut encoder, "layer_pass", &held.layers[depth], load);
@@ -2815,7 +2816,7 @@ impl WgpuRenderer {
 }
 
 fn mask_params(layer: LayerEffect, destination_span: Bounds<ScaledPixels>) -> MaskParams {
-    let source_bounds = if layer.filter.scales() {
+    let source_bounds = if layer.filter.transforms() {
         layer.source_bounds
     } else {
         destination_span
@@ -2835,6 +2836,7 @@ fn mask_params(layer: LayerEffect, destination_span: Bounds<ScaledPixels>) -> Ma
             layer.source_bounds.size.height.0,
         ],
         transform_origin: [layer.transform_origin.x.0, layer.transform_origin.y.0],
+        translation: [layer.filter.translate.x.0, layer.filter.translate.y.0],
         scale: layer.filter.scale,
         fade_top: layer.filter.fade_top,
         fade_bottom: layer.filter.fade_bottom,
@@ -2950,16 +2952,17 @@ mod tests {
         assert_eq!(std::mem::size_of::<MonochromeSprite>(), 28 * 4);
         assert_eq!(std::mem::size_of::<SubpixelSprite>(), 28 * 4);
         assert_eq!(std::mem::size_of::<PolychromeSprite>(), 24 * 4);
-        assert_eq!(std::mem::size_of::<MaskParams>(), 16 * 4);
+        assert_eq!(std::mem::size_of::<MaskParams>(), 18 * 4);
         assert_eq!(std::mem::align_of::<MaskParams>(), 8);
         assert_eq!(std::mem::offset_of!(MaskParams, source_bounds), 0);
         assert_eq!(std::mem::offset_of!(MaskParams, fade_bounds), 16);
         assert_eq!(std::mem::offset_of!(MaskParams, transform_origin), 32);
-        assert_eq!(std::mem::offset_of!(MaskParams, scale), 40);
-        assert_eq!(std::mem::offset_of!(MaskParams, fade_top), 44);
-        assert_eq!(std::mem::offset_of!(MaskParams, fade_bottom), 48);
-        assert_eq!(std::mem::offset_of!(MaskParams, fade_left), 52);
-        assert_eq!(std::mem::offset_of!(MaskParams, fade_right), 56);
-        assert_eq!(std::mem::offset_of!(MaskParams, pad), 60);
+        assert_eq!(std::mem::offset_of!(MaskParams, translation), 40);
+        assert_eq!(std::mem::offset_of!(MaskParams, scale), 48);
+        assert_eq!(std::mem::offset_of!(MaskParams, fade_top), 52);
+        assert_eq!(std::mem::offset_of!(MaskParams, fade_bottom), 56);
+        assert_eq!(std::mem::offset_of!(MaskParams, fade_left), 60);
+        assert_eq!(std::mem::offset_of!(MaskParams, fade_right), 64);
+        assert_eq!(std::mem::offset_of!(MaskParams, pad), 68);
     }
 }

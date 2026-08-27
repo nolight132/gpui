@@ -813,13 +813,13 @@ impl MetalRenderer {
                 let layer = scene.effects[*index];
                 let depth = stack.len();
                 let should_clear =
-                    !cleared[depth] || layer.filter.scales() || transformed_target[depth];
+                    !cleared[depth] || layer.filter.transforms() || transformed_target[depth];
                 let clear = match should_clear {
                     true => Some(metal::MTLClearColor::new(0., 0., 0., 0.)),
                     false => None,
                 };
                 cleared[depth] = true;
-                transformed_target[depth] = layer.filter.scales();
+                transformed_target[depth] = layer.filter.transforms();
 
                 command_encoder.end_encoding();
                 command_encoder = new_command_encoder_for_texture(
@@ -1807,6 +1807,7 @@ pub struct MaskParams {
     pub source_bounds: Bounds<ScaledPixels>,
     pub fade_bounds: Bounds<ScaledPixels>,
     pub transform_origin: [f32; 2],
+    pub translation: [f32; 2],
     pub scale: f32,
     pub fade_top: f32,
     pub fade_bottom: f32,
@@ -1816,16 +1817,17 @@ pub struct MaskParams {
 }
 
 const _: () = {
-    assert!(mem::size_of::<MaskParams>() == 16 * mem::size_of::<f32>());
+    assert!(mem::size_of::<MaskParams>() == 18 * mem::size_of::<f32>());
     assert!(mem::offset_of!(MaskParams, source_bounds) == 0);
     assert!(mem::offset_of!(MaskParams, fade_bounds) == 16);
     assert!(mem::offset_of!(MaskParams, transform_origin) == 32);
-    assert!(mem::offset_of!(MaskParams, scale) == 40);
-    assert!(mem::offset_of!(MaskParams, fade_top) == 44);
-    assert!(mem::offset_of!(MaskParams, fade_bottom) == 48);
-    assert!(mem::offset_of!(MaskParams, fade_left) == 52);
-    assert!(mem::offset_of!(MaskParams, fade_right) == 56);
-    assert!(mem::offset_of!(MaskParams, pad) == 60);
+    assert!(mem::offset_of!(MaskParams, translation) == 40);
+    assert!(mem::offset_of!(MaskParams, scale) == 48);
+    assert!(mem::offset_of!(MaskParams, fade_top) == 52);
+    assert!(mem::offset_of!(MaskParams, fade_bottom) == 56);
+    assert!(mem::offset_of!(MaskParams, fade_left) == 60);
+    assert!(mem::offset_of!(MaskParams, fade_right) == 64);
+    assert!(mem::offset_of!(MaskParams, pad) == 68);
 };
 
 #[repr(C)]
@@ -1839,19 +1841,20 @@ pub enum FilterInputIndex {
 
 fn mask_params(layer: LayerEffect, destination_clip: Bounds<ScaledPixels>) -> MaskParams {
     MaskParams {
-        source_bounds: if layer.filter.scales() {
+        source_bounds: if layer.filter.transforms() {
             layer.source_bounds
         } else {
             destination_clip
         },
         // Preserve the existing Metal fade clip for unscaled layers. A scaled layer must apply
         // the fade in source coordinates before the final transform.
-        fade_bounds: if layer.filter.scales() {
+        fade_bounds: if layer.filter.transforms() {
             layer.source_bounds
         } else {
             destination_clip
         },
         transform_origin: [layer.transform_origin.x.0, layer.transform_origin.y.0],
+        translation: [layer.filter.translate.x.0, layer.filter.translate.y.0],
         scale: layer.filter.scale,
         fade_top: layer.filter.fade_top,
         fade_bottom: layer.filter.fade_bottom,

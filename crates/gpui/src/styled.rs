@@ -553,6 +553,23 @@ pub trait Styled: Sized {
         self
     }
 
+    /// Translates this element and its subtree as one composited image without changing layout or
+    /// hitboxes. Fractional values are preserved by the compositor, making this suitable for the
+    /// presentation position of a spring animation.
+    ///
+    /// Only the pixels the layer already painted move. Nothing is pulled in from beyond its
+    /// bounds, so a translation of `n` pixels leaves an `n` pixel gap at the leading edge. It
+    /// suits settling a spring rather than carrying a whole scroll distance.
+    /// The current WebGL renderer does not composite layer filters.
+    fn layer_translate(mut self, translation: crate::Point<Pixels>) -> Self {
+        assert!(
+            translation.x.0.is_finite() && translation.y.0.is_finite(),
+            "layer translation must be finite"
+        );
+        self.style().filter.get_or_insert_default().translate = Some(translation);
+        self
+    }
+
     /// Sets where [`Self::layer_scale`] grows from, as a fraction of this
     /// element's bounds: `(0., 0.5)` scales out from the middle of its left
     /// edge. Without this a scale grows from the centre.

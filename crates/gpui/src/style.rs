@@ -454,6 +454,8 @@ pub struct LayerFilter {
     /// Uniformly scale the composited layer without affecting layout. Values must be finite and
     /// greater than zero.
     pub scale: Option<f32>,
+    /// Translate the composited layer without affecting layout or hitboxes.
+    pub translate: Option<Point<Pixels>>,
     /// Where the scale grows from, as a fraction of the layer's own bounds:
     /// `(0, 0)` is its top left corner, `(1, 1)` its bottom right. Defaults to
     /// the centre.
@@ -469,6 +471,9 @@ impl LayerFilter {
             && self.fade_left.is_none()
             && self.fade_right.is_none()
             && self.scale.is_none_or(|scale| scale == 1.0)
+            && self
+                .translate
+                .is_none_or(|translate| translate == Point::default())
     }
 }
 
@@ -1392,7 +1397,7 @@ impl From<Position> for taffy::style::Position {
 
 #[cfg(test)]
 mod tests {
-    use crate::{blue, green, px, red, yellow};
+    use crate::{blue, green, point, px, red, yellow};
 
     use super::*;
 
@@ -1414,6 +1419,13 @@ mod tests {
     fn layer_scale_builder_sets_a_paint_filter() {
         let refinement = StyleRefinement::default().layer_scale(0.9973);
         assert_eq!(refinement.filter.unwrap().scale, Some(0.9973));
+    }
+
+    #[test]
+    fn layer_translate_builder_sets_a_paint_filter() {
+        let translation = point(px(0.25), px(-0.75));
+        let refinement = StyleRefinement::default().layer_translate(translation);
+        assert_eq!(refinement.filter.unwrap().translate, Some(translation));
     }
 
     #[test]

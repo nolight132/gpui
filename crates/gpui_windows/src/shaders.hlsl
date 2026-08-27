@@ -1335,7 +1335,7 @@ struct FilterParams {
     float fade_bottom;
     float fade_left;
     float fade_right;
-    float2 filter_pad;
+    float2 translation;
 };
 
 struct FilterVertexOutput {
@@ -1401,7 +1401,7 @@ float4 mask_fragment(FilterFragmentInput input): SV_Target {
     FilterParams params = filter_params[batch_start_index];
     float2 destination_point = input.position.xy;
     float2 source_point = params.transform_origin
-        + (destination_point - params.transform_origin) / params.scale;
+        + (destination_point - params.translation - params.transform_origin) / params.scale;
     float2 source_end = params.source_bounds.origin + params.source_bounds.size;
     if (any(source_point < params.source_bounds.origin)
         || any(source_point >= source_end)
