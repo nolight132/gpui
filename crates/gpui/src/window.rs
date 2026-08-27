@@ -4220,6 +4220,7 @@ impl Window {
                 "layer scale must be finite and greater than zero"
             );
         }
+        let grows_from = filter.scale_origin;
         let filter = Filter {
             blur: filter.blur.map_or(0., |blur| blur.0 * scale_factor),
             fade_top: filter.fade_top.map_or(0., |fade| fade.0 * scale_factor),
@@ -4233,7 +4234,14 @@ impl Window {
         }
 
         let element_bounds = bounds.scale(scale_factor);
-        let transform_origin = element_bounds.center();
+        let transform_origin = match grows_from {
+            Some(origin) => element_bounds.origin
+                + point(
+                    element_bounds.size.width * origin.x,
+                    element_bounds.size.height * origin.y,
+                ),
+            None => element_bounds.center(),
+        };
         let source_bounds = element_bounds.dilate(ScaledPixels(filter.blur * BLUR_REACH));
         let content_mask = self.snapped_content_mask().bounds;
         self.next_frame

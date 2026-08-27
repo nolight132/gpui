@@ -553,6 +553,14 @@ pub trait Styled: Sized {
         self
     }
 
+    /// Sets where [`Self::layer_scale`] grows from, as a fraction of this
+    /// element's bounds: `(0., 0.5)` scales out from the middle of its left
+    /// edge. Without this a scale grows from the centre.
+    fn layer_scale_origin(mut self, origin: crate::Point<f32>) -> Self {
+        self.style().filter.get_or_insert_default().scale_origin = Some(origin);
+        self
+    }
+
     /// Blurs whatever is painted behind this element.
     fn backdrop_blur(mut self, blur: Pixels) -> Self {
         self.style().backdrop_blur = Some(blur);

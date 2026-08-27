@@ -454,6 +454,10 @@ pub struct LayerFilter {
     /// Uniformly scale the composited layer without affecting layout. Values must be finite and
     /// greater than zero.
     pub scale: Option<f32>,
+    /// Where the scale grows from, as a fraction of the layer's own bounds:
+    /// `(0, 0)` is its top left corner, `(1, 1)` its bottom right. Defaults to
+    /// the centre.
+    pub scale_origin: Option<Point<f32>>,
 }
 
 impl LayerFilter {
