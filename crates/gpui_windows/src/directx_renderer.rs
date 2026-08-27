@@ -143,7 +143,7 @@ struct FilterParams {
     fade_bottom: f32,
     fade_left: f32,
     fade_right: f32,
-    pad: [f32; 2],
+    translation: [f32; 2],
 }
 
 const _: () = {
@@ -158,7 +158,7 @@ const _: () = {
     assert!(std::mem::offset_of!(FilterParams, fade_bottom) == 60);
     assert!(std::mem::offset_of!(FilterParams, fade_left) == 64);
     assert!(std::mem::offset_of!(FilterParams, fade_right) == 68);
-    assert!(std::mem::offset_of!(FilterParams, pad) == 72);
+    assert!(std::mem::offset_of!(FilterParams, translation) == 72);
 };
 
 #[derive(Clone, Copy)]
@@ -430,19 +430,20 @@ impl DirectXRenderer {
 
         let (device, device_context, sampler, batch_params) = self.pipeline_handles()?;
         let params = [FilterParams {
-            source_bounds: if layer.filter.scales() {
+            source_bounds: if layer.filter.transforms() {
                 layer.source_bounds
             } else {
                 clip
             },
             // Preserve the existing DirectX fade clip for unscaled layers. A scaled layer applies
             // the fade in source coordinates before the final transform.
-            fade_bounds: if layer.filter.scales() {
+            fade_bounds: if layer.filter.transforms() {
                 layer.source_bounds
             } else {
                 clip
             },
             transform_origin: [layer.transform_origin.x.0, layer.transform_origin.y.0],
+            translation: [layer.filter.translate.x.0, layer.filter.translate.y.0],
             scale: layer.filter.scale,
             fade_top: layer.filter.fade_top,
             fade_bottom: layer.filter.fade_bottom,
@@ -877,10 +878,10 @@ impl DirectXRenderer {
                 let layer = scene.effects[*index];
                 let depth = stack.len();
                 let should_clear =
-                    !cleared[depth] || layer.filter.scales() || transformed_target[depth];
+                    !cleared[depth] || layer.filter.transforms() || transformed_target[depth];
                 self.open_layer(depth, should_clear)?;
                 cleared[depth] = true;
-                transformed_target[depth] = layer.filter.scales();
+                transformed_target[depth] = layer.filter.transforms();
                 stack.push(*index);
                 spans.push(layer.destination_clip());
             }

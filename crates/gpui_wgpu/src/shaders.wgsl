@@ -1464,6 +1464,7 @@ struct Mask {
     source_bounds: Bounds,
     fade_bounds: Bounds,
     transform_origin: vec2<f32>,
+    translation: vec2<f32>,
     scale: f32,
     fade_top: f32,
     fade_bottom: f32,
@@ -1477,7 +1478,7 @@ fn fs_mask(input: BlurVarying) -> @location(0) vec4<f32> {
     let mask = load_mask(0u);
     let destination_point = input.position.xy;
     let source_point = mask.transform_origin
-        + (destination_point - mask.transform_origin) / mask.scale;
+        + (destination_point - mask.translation - mask.transform_origin) / mask.scale;
     let source_end = mask.source_bounds.origin + mask.source_bounds.size;
     if (any(source_point < mask.source_bounds.origin)
         || any(source_point >= source_end)

@@ -103,7 +103,9 @@ impl Scene {
         filter: Filter,
     ) {
         let start = self.primitive_bounds.barrier();
-        let destination_bounds = scale_bounds_around(source_bounds, transform_origin, filter.scale);
+        let mut destination_bounds =
+            scale_bounds_around(source_bounds, transform_origin, filter.scale);
+        destination_bounds.origin += filter.translate;
         self.effects.push(LayerEffect {
             start,
             end: DrawOrder::MAX,
@@ -355,7 +357,7 @@ pub struct LayerEffect {
     pub source_bounds: Bounds<ScaledPixels>,
     /// The center of the element's original bounds, before adding blur reach.
     pub transform_origin: Point<ScaledPixels>,
-    /// The source bounds after applying the layer scale around `transform_origin`.
+    /// The source bounds after applying the layer scale and translation.
     pub destination_bounds: Bounds<ScaledPixels>,
     /// The parent content mask that was in force when the layer opened.
     pub content_mask: Bounds<ScaledPixels>,
@@ -375,7 +377,7 @@ impl LayerEffect {
         &self,
         destination_span: Bounds<ScaledPixels>,
     ) -> Bounds<ScaledPixels> {
-        if !self.filter.scales() {
+        if !self.filter.transforms() {
             return destination_span;
         }
 
@@ -396,7 +398,7 @@ impl LayerEffect {
     /// Unscaled layers retain the previous clipped processing area. A transformed layer must keep
     /// its whole source because the destination clip is in a different coordinate space.
     pub fn blur_bounds(&self, destination_span: Bounds<ScaledPixels>) -> Bounds<ScaledPixels> {
-        if self.filter.scales() {
+        if self.filter.transforms() {
             self.source_bounds
         } else {
             destination_span
@@ -408,7 +410,7 @@ impl LayerEffect {
         self.filter == next.filter
             && self.parent == next.parent
             && !next.filter.fades()
-            && !self.filter.scales()
+            && !self.filter.transforms()
     }
 }
 
@@ -427,6 +429,8 @@ pub struct Filter {
     pub fade_right: f32,
     /// Uniform compositor scale around the layer's transform origin.
     pub scale: f32,
+    /// Compositor translation in scaled pixels.
+    pub translate: Point<ScaledPixels>,
 }
 
 impl Default for Filter {
@@ -438,6 +442,7 @@ impl Default for Filter {
             fade_left: 0.0,
             fade_right: 0.0,
             scale: 1.0,
+            translate: Point::default(),
         }
     }
 }
@@ -445,7 +450,7 @@ impl Default for Filter {
 impl Filter {
     /// Whether the layer changes its contents at all.
     pub fn is_noop(&self) -> bool {
-        self.blur <= 0. && !self.fades() && !self.scales()
+        self.blur <= 0. && !self.fades() && !self.transforms()
     }
 
     /// Whether the layer has to go through the blur passes.
@@ -461,6 +466,16 @@ impl Filter {
     /// Whether the layer is transformed while it is composited.
     pub fn scales(&self) -> bool {
         self.scale != 1.0
+    }
+
+    /// Whether the layer is translated while it is composited.
+    pub fn translates(&self) -> bool {
+        self.translate != Point::default()
+    }
+
+    /// Whether the layer is transformed while it is composited.
+    pub fn transforms(&self) -> bool {
+        self.scales() || self.translates()
     }
 }
 
@@ -523,6 +538,35 @@ mod layer_filter_tests {
         assert!(Filter::default().is_noop());
         assert!(filter(1.0).is_noop());
         assert!(!filter(0.99).is_noop());
+
+        let translated = Filter {
+            translate: origin(0.25, -0.75),
+            ..Default::default()
+        };
+        assert!(!translated.is_noop());
+        assert!(translated.transforms());
+    }
+
+    #[test]
+    fn fractional_translation_moves_only_the_destination() {
+        let source = rect(10.0, 20.0, 100.0, 40.0);
+        let mut scene = Scene::default();
+        scene.push_filter(
+            source,
+            origin(60.0, 40.0),
+            rect(0.0, 0.0, 200.0, 100.0),
+            Filter {
+                translate: origin(0.25, -0.75),
+                ..Default::default()
+            },
+        );
+        scene.pop_filter();
+
+        assert_eq!(scene.effects[0].source_bounds, source);
+        assert_bounds_close(
+            scene.effects[0].destination_bounds,
+            rect(10.25, 19.25, 100.0, 40.0),
+        );
     }
 
     #[test]

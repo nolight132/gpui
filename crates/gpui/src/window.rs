@@ -4237,6 +4237,12 @@ impl Window {
                 "layer scale must be finite and greater than zero"
             );
         }
+        if let Some(translation) = filter.translate {
+            assert!(
+                translation.x.0.is_finite() && translation.y.0.is_finite(),
+                "layer translation must be finite"
+            );
+        }
         let grows_from = filter.scale_origin;
         let filter = Filter {
             blur: filter.blur.map_or(0., |blur| blur.0 * scale_factor),
@@ -4245,6 +4251,9 @@ impl Window {
             fade_left: filter.fade_left.map_or(0., |fade| fade.0 * scale_factor),
             fade_right: filter.fade_right.map_or(0., |fade| fade.0 * scale_factor),
             scale: filter.scale.unwrap_or(1.0),
+            translate: filter.translate.map_or_else(Point::default, |translation| {
+                translation.scale(scale_factor)
+            }),
         };
         if filter.is_noop() {
             return f(self);

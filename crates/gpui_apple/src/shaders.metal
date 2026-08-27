@@ -1388,7 +1388,8 @@ fragment float4 mask_fragment(
   float2 extent = float2(float(viewport_size->width), float(viewport_size->height));
   float2 destination_point = input.position.xy;
   float2 origin = float2(params->transform_origin[0], params->transform_origin[1]);
-  float2 source_point = origin + (destination_point - origin) / params->scale;
+  float2 translation = float2(params->translation[0], params->translation[1]);
+  float2 source_point = origin + (destination_point - translation - origin) / params->scale;
   float2 source_origin = float2(params->source_bounds.origin.x,
                                 params->source_bounds.origin.y);
   float2 source_end = source_origin + float2(params->source_bounds.size.width,
