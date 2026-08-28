@@ -497,7 +497,7 @@ impl DirectXRenderer {
         for shrunk in 0..step {
             let shrink = BLUR_STEPS[shrunk + 1];
             let within = region(self, sigma * BLUR_REACH * 2., shrink)?;
-            from = self.filter_pass(Pass::Blit, from, [shrunk, 0], None, within)?;
+            from = self.filter_pass(Pass::Blit, from, [shrunk + 1, 0], None, within)?;
         }
 
         let across = FilterParams {

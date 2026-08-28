@@ -1119,16 +1119,16 @@ impl MetalRenderer {
 
         let mut from = source;
         for shrunk in 0..step {
-            let shrink = BLUR_STEPS[shrunk];
+            let shrink = BLUR_STEPS[shrunk + 1];
             self.filter_pass(
                 command_buffer,
                 &self.blit_pipeline_state,
                 from,
-                &targets.steps[shrunk][0],
+                &targets.steps[shrunk + 1][0],
                 None,
                 within(sigma * BLUR_REACH * 2., shrink),
             );
-            from = &targets.steps[shrunk][0];
+            from = &targets.steps[shrunk + 1][0];
         }
 
         let shrink = BLUR_STEPS[step];
