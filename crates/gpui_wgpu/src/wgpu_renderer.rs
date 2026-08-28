@@ -1365,7 +1365,7 @@ impl WgpuRenderer {
 
         let mut from = source;
         for shrunk in 0..step {
-            let shrink = BLUR_STEPS[shrunk + 1];
+            let shrink = BLUR_STEPS[shrunk];
             self.fullscreen_pass(
                 encoder,
                 "blur_shrink",
