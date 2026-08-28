@@ -1021,16 +1021,16 @@ impl MetalRenderer {
         shrink: u32,
     ) -> Option<metal::MTLScissorRect> {
         let shrink = shrink as f32;
-        let width = i32::from(viewport_size.width) as f32 / shrink;
-        let height = i32::from(viewport_size.height) as f32 / shrink;
-        let left = (bounds.origin.x.0 / shrink).max(0.).min(width);
-        let top = (bounds.origin.y.0 / shrink).max(0.).min(height);
+        let width = (i32::from(viewport_size.width) as f32 / shrink).floor();
+        let height = (i32::from(viewport_size.height) as f32 / shrink).floor();
+        let left = (bounds.origin.x.0 / shrink).floor().clamp(0., width);
+        let top = (bounds.origin.y.0 / shrink).floor().clamp(0., height);
         let right = ((bounds.origin.x.0 + bounds.size.width.0) / shrink)
-            .max(0.)
-            .min(width);
+            .ceil()
+            .clamp(left, width);
         let bottom = ((bounds.origin.y.0 + bounds.size.height.0) / shrink)
-            .max(0.)
-            .min(height);
+            .ceil()
+            .clamp(top, height);
         if right <= left || bottom <= top {
             return None;
         }
