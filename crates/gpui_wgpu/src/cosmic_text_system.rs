@@ -64,7 +64,7 @@ struct CosmicTextSystemState {
 struct LoadedFont {
     font: Arc<CosmicTextFont>,
     features: CosmicFontFeatures,
-    is_known_emoji_font: bool,
+    has_color_glyphs: bool,
     instantiated_weight: CosmicWeight,
     /// empty when not variable
     wght_coords: SmallVec<[NormalizedCoord; 4]>,
@@ -339,7 +339,10 @@ impl CosmicTextSystemState {
                 "Segoe Fluent Icons",
             ];
 
+            let has_color_glyphs = font_has_color_glyphs(&default_instance);
+
             if default_instance.as_swash().charmap().map('m') == 0
+                && !has_color_glyphs
                 && !allowed_bad_font_names.contains(&postscript_name.as_str())
             {
                 self.font_system.db_mut().remove_face(default_instance.id());
@@ -363,7 +366,7 @@ impl CosmicTextSystemState {
             self.loaded_fonts.push(LoadedFont {
                 font,
                 features: cosmic_features.clone(),
-                is_known_emoji_font: check_is_known_emoji_font(&postscript_name),
+                has_color_glyphs,
                 instantiated_weight,
                 wght_coords,
                 user_fallback_chain: Arc::clone(&user_fallback_chain),
@@ -516,7 +519,7 @@ impl CosmicTextSystemState {
             .face(id)
             .context("fallback font face not found in cosmic-text database")?;
         let face_weight = face.weight;
-        let is_known_emoji_font = check_is_known_emoji_font(&face.post_script_name);
+        let has_color_glyphs = font_has_color_glyphs(&default_instance);
 
         let (font, instantiated_weight, wght_coords) =
             match wght_instance(&default_instance, weight) {
@@ -534,7 +537,7 @@ impl CosmicTextSystemState {
         self.loaded_fonts.push(LoadedFont {
             font,
             features: CosmicFontFeatures::new(),
-            is_known_emoji_font,
+            has_color_glyphs,
             instantiated_weight,
             wght_coords,
             user_fallback_chain: Arc::from(Vec::new()),
@@ -773,7 +776,7 @@ impl CosmicTextSystemState {
                     }
                 }
             }
-            let is_emoji = loaded_font.is_known_emoji_font;
+            let is_emoji = loaded_font.has_color_glyphs;
 
             // HACK: Prevent crash caused by variation selectors.
             if glyph.glyph_id == 3 && is_emoji {
@@ -1087,9 +1090,9 @@ fn face_info_into_properties(
     }
 }
 
-fn check_is_known_emoji_font(postscript_name: &str) -> bool {
-    // TODO: Include other common emoji fonts
-    postscript_name == "NotoColorEmoji"
+fn font_has_color_glyphs(font: &CosmicTextFont) -> bool {
+    let swash_font = font.as_swash();
+    swash_font.color_palettes().len() > 0 || swash_font.color_strikes().len() > 0
 }
 
 #[cfg(test)]
